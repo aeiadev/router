@@ -1,0 +1,19 @@
+# Optional project instructions for Codex
+
+Use $dispatch for bounded parallel work. Validate exactly one nonempty TASK,
+FILES, BAR, and RETURN field before dispatch. Free-text notes may follow them.
+Use spawn_agent with agent_type, a stable task_name, message, and fork_turns="none".
+Omit model and reasoning_effort; the installed role TOML pins those defaults.
+
+Use seat-sweep for evidence, seat-exec for isolated implementation, and a fresh
+seat-judge to check every result. Create or assign separate Git worktrees before
+concurrent edits. Preserve unrelated work.
+
+Keep task_name and the base role stable across retries. Execution rounds one and
+two use seat-exec. Round three explicitly uses seat-exec-up. Round four returns
+to the owner. Do not rename tasks or switch role families to evade the ladder.
+
+The Codex hook checks visible roles and task names. It cannot inspect the encrypted
+brief message: the dispatch skill and role instructions must check its format.
+Review and trust new or changed Codex hooks before relying on routing. Use router
+off, router on, and router status for the same switch as Claude Code.

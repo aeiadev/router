@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/spawn_guard.py\""}
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|Bash|SubagentHandback",
+        "hooks": [
+          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""}
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""}
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""}
+        ]
+      }
+    ]
+  }
+}

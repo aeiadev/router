@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""The single switch for all routing hooks: router on|off|status."""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+package = Path(__file__).resolve().parents[1] / "hooks" / "router"
+if not (package / "common.py").is_file():
+    package = Path(__file__).resolve().parents[2] / "hooks" / "router"
+if not (package / "common.py").is_file():
+    home = Path(os.environ.get("CLAUDE_HOME") or Path.home() / ".claude").expanduser()
+    package = Path(os.environ.get("ROUTER_HOME") or home / "router").expanduser()
+sys.path.insert(0, str(package))
+import common
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("on", "off", "status"))
+    args = parser.parse_args()
+    switch = common.off_file()
+    if args.command == "off":
+        switch.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        switch.touch(mode=0o600, exist_ok=True)
+    elif args.command == "on":
+        switch.unlink(missing_ok=True)
+    print("off" if common.killed() else "on")
+    print(f"switch: {switch}")
+    if os.environ.get("ROUTER_OFF") == "1":
+        print("ROUTER_OFF=1 is set; unset it to enable routing.")
+    if args.command == "status":
+        routes = common.load_routes()
+        for section in ("router", "context"):
+            for rule, mode in sorted(routes[section]["modes"].items()):
+                print(f"{section}.{rule}: {mode}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError) as exc:
+        print(f"router: {exc}", file=sys.stderr)
+        sys.exit(1)

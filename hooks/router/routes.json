@@ -1,0 +1,276 @@
+{
+  "version": 1,
+  "tiers": {
+    "seat-exec-here": {
+      "light": {
+        "agent": "seat-exec-here-light",
+        "model": "sonnet",
+        "effort": "medium"
+      },
+      "std": {
+        "agent": "seat-exec-here-std",
+        "model": "sonnet",
+        "effort": "medium"
+      },
+      "up": {
+        "agent": "seat-exec-here-up",
+        "model": "opus",
+        "effort": "xhigh"
+      }
+    },
+    "seat-exec": {
+      "light": {
+        "agent": "seat-exec-light",
+        "model": "sonnet",
+        "effort": "medium"
+      },
+      "std": {
+        "agent": "seat-exec-std",
+        "model": "sonnet",
+        "effort": "medium"
+      },
+      "up": {
+        "agent": "seat-exec-up",
+        "model": "opus",
+        "effort": "xhigh"
+      }
+    },
+    "seat-judge": {
+      "std": {
+        "agent": "seat-judge-std",
+        "model": "opus",
+        "effort": "high"
+      },
+      "up": {
+        "agent": "seat-judge-up",
+        "model": "opus",
+        "effort": "xhigh"
+      },
+      "light": {
+        "agent": "seat-judge-light",
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    "seat-sweep": {
+      "light": {
+        "agent": "seat-sweep-light",
+        "model": "haiku",
+        "effort": "none"
+      },
+      "std": {
+        "agent": "seat-sweep-std",
+        "model": "sonnet",
+        "effort": "medium"
+      },
+      "up": {
+        "agent": "seat-sweep-up",
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    "Explore": {
+      "std": {
+        "agent": "explore-std",
+        "model": "sonnet",
+        "effort": "medium"
+      },
+      "up": {
+        "agent": "explore-up",
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    "Plan": {
+      "std": {
+        "agent": "plan-std",
+        "model": "sonnet",
+        "effort": "high"
+      },
+      "up": {
+        "agent": "plan-up",
+        "model": "opus",
+        "effort": "xhigh"
+      }
+    },
+    "general-purpose": {
+      "std": {
+        "agent": "worker-std",
+        "model": "sonnet",
+        "effort": "high"
+      },
+      "up": {
+        "agent": "worker-up",
+        "model": "opus",
+        "effort": "xhigh"
+      }
+    }
+  },
+  "tier_sources": {
+    "Explore": {
+      "source": "agents/Explore.md",
+      "prefix": "explore-"
+    },
+    "Plan": {
+      "source": "agents/Plan.md",
+      "prefix": "plan-"
+    },
+    "general-purpose": {
+      "source": "agents/general-purpose.md",
+      "prefix": "worker-"
+    }
+  },
+  "active_after": "",
+  "router": {
+    "modes": {
+      "inject": "enforce",
+      "redirect": "enforce",
+      "block_model": "enforce",
+      "risk": "shadow",
+      "ladder": "enforce",
+      "inject_unlisted": "enforce"
+    },
+    "types": {
+      "seat-sweep": {
+        "class": "sweep",
+        "allow": [
+          "haiku",
+          "sonnet"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": true
+      },
+      "seat-exec": {
+        "class": "exec",
+        "allow": [
+          "sonnet"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": true
+      },
+      "seat-exec-here": {
+        "class": "exec",
+        "allow": [
+          "sonnet"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": true
+      },
+      "seat-judge": {
+        "class": "judge",
+        "allow": [
+          "opus"
+        ],
+        "tiered": true
+      },
+      "general-purpose": {
+        "class": "worker",
+        "allow": [
+          "sonnet",
+          "haiku"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": true
+      },
+      "Explore": {
+        "class": "research",
+        "allow": [
+          "sonnet",
+          "haiku"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": true,
+        "inject": "sonnet"
+      },
+      "Plan": {
+        "class": "research",
+        "allow": [
+          "sonnet",
+          "haiku"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": true,
+        "inject": "sonnet"
+      }
+    },
+    "never": [],
+    "top_tier_models": [
+      "gpt-6-astra"
+    ],
+    "unlisted": {
+      "default_model": "sonnet",
+      "models": {},
+      "mode_key": "inject_unlisted"
+    },
+    "up_codes": [
+      "risk",
+      "security",
+      "novel",
+      "cross-cutting",
+      "ladder"
+    ],
+    "risk_globs": [
+      "*/.claude/hooks/*",
+      "*/.claude/settings*",
+      "*/.ssh/*",
+      "*secret*",
+      "*credential*",
+      "*.env",
+      "*/.env.*",
+      "*auth*",
+      "*payment*",
+      "*migration*",
+      "*/.github/workflows/*",
+      "*deploy*"
+    ],
+    "risk_words": [
+      "security",
+      "secret",
+      "credential",
+      "auth",
+      "payment",
+      "migration",
+      "deploy",
+      "production",
+      "irreversible"
+    ]
+  },
+  "context": {
+    "modes": {
+      "start_note": "enforce",
+      "stop_cap_seats": "enforce",
+      "stop_cap_research": "shadow",
+      "chain_note": "enforce",
+      "large_read": "shadow"
+    },
+    "caps": {
+      "exec": 1500,
+      "judge": 1500,
+      "sweep": 3000,
+      "research": 5000,
+      "worker": 5000
+    },
+    "chain": {
+      "first": 5,
+      "repeat": 10,
+      "same_turn_ms": 1500,
+      "idle_reset_s": 180
+    },
+    "large_read_bytes": 24000,
+    "read_allow_globs": [
+      "*/.claude/plans/*"
+    ]
+  }
+}

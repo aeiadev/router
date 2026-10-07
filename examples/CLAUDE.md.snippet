@@ -1,0 +1,14 @@
+## Router delegation
+
+- Use the `dispatch` skill when work splits cleanly, fits a four-line brief, has
+  an independent verifier, and is worth the extra model calls.
+- Every brief has TASK, FILES, BAR, and RETURN. Workers return five lines:
+  CHANGED / BAR / OUTPUT / NOT DONE / OPEN.
+- Send evidence sweeps to `seat-sweep` (Haiku), bounded builds to `seat-exec`
+  (Sonnet, its own worktree), and every return to a fresh `seat-judge` (Opus).
+- Let the router choose the model and tier. The judge reads the actual work,
+  re-runs the BAR, returns PASS or SEND_BACK, and never fixes it.
+- Retry a failed execution brief on Sonnet once. Next use `route: up ladder`
+  for one Opus attempt. After that, return the unresolved brief to the owner.
+- Keep FILES narrow, preserve unrelated work, and never include secrets in returns.
+- `router off` disables the hooks; `router on` enables them again.

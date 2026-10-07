@@ -1,0 +1,10 @@
+title = "Router secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "absolute-user-home"
+description = "Keep machine-specific home paths out of the public package"
+regex = '''/(?:home|Users)/[A-Za-z0-9_.-]+/'''
+keywords = ["/home/", "/Users/"]
