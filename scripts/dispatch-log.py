@@ -75,7 +75,8 @@ def main():
                 for row in rows:
                     print(json.dumps(row, ensure_ascii=True))
                 return 0
-            is_exec = args.seat.startswith(("seat-exec", "worker-")) or args.seat == "general-purpose"
+            is_exec = (args.seat.startswith(("builder", "seat-exec", "worker-"))
+                       or args.seat in ("worker", "general-purpose", "test-writer", "docs-writer"))
             number = rounds(rows, family) + 1 if is_exec and not args.no_edits else None
             if number is not None:
                 permitted = ((number <= 2 and args.model == "sonnet" and not args.escalated)

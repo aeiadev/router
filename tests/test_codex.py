@@ -41,7 +41,7 @@ class CodexSpawnTests(unittest.TestCase):
         })
 
     @staticmethod
-    def spawn(role="seat-exec", task="exec-helper", **fields):
+    def spawn(role="builder", task="exec-helper", **fields):
         return dict(agent_type=role, task_name=task,
                     message="encrypted:opaque-message-envelope", **fields)
 
@@ -86,12 +86,12 @@ class CodexSpawnTests(unittest.TestCase):
 
     def test_codex_tool_names_allow_pinned_roles_without_rewrites(self):
         for tool in ("collaborationspawn_agent", "spawn_agent"):
-            for role in ("seat-sweep", "seat-exec", "seat-exec-here", "seat-judge"):
+            for role in ("sweeper", "builder", "builder-in-place", "judge"):
                 with self.subTest(tool=tool, role=role):
                     self.assert_allowed(self.hook(self.spawn(role, task=role + tool), tool=tool))
 
     def test_non_exec_upper_roles_require_up_code_on_both_hosts(self):
-        for role in ("worker-up", "seat-sweep-up", "explore-up", "plan-up"):
+        for role in ("worker-up", "sweeper-up", "researcher-up", "planner-up"):
             with self.subTest(role=role):
                 codex = self.hook(self.spawn(role))
                 claude = self.hook({"subagent_type": role, "prompt": "Find the helper"},
@@ -102,7 +102,7 @@ class CodexSpawnTests(unittest.TestCase):
 
     def test_top_tier_models_require_visible_up_code_on_both_hosts(self):
         for model in ("opus", "claude-opus-5-5", "gpt-6-astra", " GPT-6-ASTRA "):
-            for role in ("unlisted-role", "seat-sweep"):
+            for role in ("unlisted-role", "sweeper"):
                 for directive in ("", "\nroute: up novel", "\nroute: up invalid"):
                     for host in ("claude", "codex"):
                         with self.subTest(model=model, role=role, directive=directive, host=host):
@@ -124,7 +124,7 @@ class CodexSpawnTests(unittest.TestCase):
         routes = json.loads(ROUTES.read_text(encoding="utf-8"))
         routes["router"]["top_tier_models"] = ["custom-upper-model"]
         # Native upper models must also come from the route table.
-        routes["tiers"]["seat-sweep"]["up"]["model"] = "sonnet"
+        routes["tiers"]["sweeper"]["up"]["model"] = "sonnet"
         routes_path = self.root / "top-tier-routes.json"
         for mode in ("enforce", "shadow", "off"):
             routes["router"]["modes"]["block_model"] = mode
@@ -156,27 +156,27 @@ class CodexSpawnTests(unittest.TestCase):
             for mode in ("off", "shadow"):
                 profiles[key + "-" + mode] = dict(defaults, **{key: mode})
         cases = [
-            ("sweep", {"role": "seat-sweep"}),
-            ("exec", {"role": "seat-exec"}),
-            ("judge", {"role": "seat-judge"}),
+            ("sweep", {"role": "sweeper"}),
+            ("exec", {"role": "builder"}),
+            ("judge", {"role": "judge"}),
             ("unknown-role", {"role": "unknown-role"}),
             ("missing-role", {}),
             ("empty-role", {"role": ""}),
             ("null-role", {"role": None}),
             ("invalid-role", {"role": []}),
-            ("standard-model", {"role": "seat-sweep", "model": "sonnet"}),
-            ("upper-model", {"role": "seat-sweep", "model": "opus"}),
-            ("upper-astra", {"role": "seat-sweep", "model": "gpt-6-astra"}),
+            ("standard-model", {"role": "sweeper", "model": "sonnet"}),
+            ("upper-model", {"role": "sweeper", "model": "opus"}),
+            ("upper-astra", {"role": "sweeper", "model": "gpt-6-astra"}),
             ("unlisted-astra", {"role": "unknown-role", "model": "gpt-6-astra"}),
             ("unlisted-opus-id", {"role": "unknown-role", "model": "claude-opus-5-5"}),
-            ("pinned-model", {"role": "seat-exec", "model": "gpt-6-astra"}),
-            ("unknown-model", {"role": "seat-exec", "model": "unknown-model"}),
-            ("excluded-model", {"role": "seat-exec", "model": "excluded-model"}),
-            ("null-model", {"role": "seat-exec", "model": None}),
-            ("effort", {"role": "seat-exec", "reasoning_effort": "high"}),
-            ("model-effort", {"role": "seat-exec", "model_reasoning_effort": "high"}),
+            ("pinned-model", {"role": "builder", "model": "gpt-6-astra"}),
+            ("unknown-model", {"role": "builder", "model": "unknown-model"}),
+            ("excluded-model", {"role": "builder", "model": "excluded-model"}),
+            ("null-model", {"role": "builder", "model": None}),
+            ("effort", {"role": "builder", "reasoning_effort": "high"}),
+            ("model-effort", {"role": "builder", "model_reasoning_effort": "high"}),
         ] + [(role, {"role": role}) for role in
-             ("worker-up", "seat-sweep-up", "explore-up", "plan-up")]
+             ("worker-up", "sweeper-up", "researcher-up", "planner-up")]
         routes["router"]["never"] = ["excluded-model"]
         routes_path = self.root / "parity-routes.json"
 
@@ -248,7 +248,7 @@ class CodexSpawnTests(unittest.TestCase):
             for attempt in range(4):
                 with self.subTest(mode=mode, attempt=attempt + 1):
                     self.assert_allowed(self.hook(self.spawn(task=mode), extra=extra))
-                    claude = self.hook({"subagent_type": "seat-exec", "prompt": mode},
+                    claude = self.hook({"subagent_type": "builder", "prompt": mode},
                                        tool="Agent", guard=CLAUDE_GUARD, extra=extra)
                     self.assertEqual(claude.returncode, 0, claude.stderr)
                     records = [json.loads(line) for line in
@@ -259,9 +259,9 @@ class CodexSpawnTests(unittest.TestCase):
                         self.assertEqual(record["shadow"], [expected] if expected else [])
             # Disabling the ladder must not manufacture an up code and bypass
             # block_model. Both hosts still reject this independent violation.
-            self.assert_denied(self.hook(self.spawn("seat-exec-up", task=mode), extra=extra),
+            self.assert_denied(self.hook(self.spawn("builder-up", task=mode), extra=extra),
                                "known `route: up <code>`")
-            self.assert_denied(self.hook({"subagent_type": "seat-exec-up", "prompt": mode},
+            self.assert_denied(self.hook({"subagent_type": "builder-up", "prompt": mode},
                                          tool="Agent", guard=CLAUDE_GUARD, extra=extra),
                                "known `route: up <code>`")
 
@@ -272,14 +272,14 @@ class CodexSpawnTests(unittest.TestCase):
         self.assertFalse(self.state.exists(), "Ignored tools must not create routing state")
 
     def test_ladder_requires_two_standard_rounds_then_explicit_up_role(self):
-        self.assert_denied(self.hook(self.spawn("seat-exec-up")))
-        self.assert_allowed(self.hook(self.spawn("seat-exec-light")))
-        self.assert_denied(self.hook(self.spawn("seat-exec-up")))
-        self.assert_allowed(self.hook(self.spawn("seat-exec-std")))
-        self.assert_denied(self.hook(), "3", "seat-exec-up")
-        self.assert_denied(self.hook(self.spawn("seat-exec-light")), "3")
-        self.assert_allowed(self.hook(self.spawn("seat-exec-up")))
-        self.assert_denied(self.hook(self.spawn("seat-exec-up")), "owner")
+        self.assert_denied(self.hook(self.spawn("builder-up")))
+        self.assert_allowed(self.hook(self.spawn("builder-light")))
+        self.assert_denied(self.hook(self.spawn("builder-up")))
+        self.assert_allowed(self.hook(self.spawn("builder-std")))
+        self.assert_denied(self.hook(), "3", "builder-up")
+        self.assert_denied(self.hook(self.spawn("builder-light")), "3")
+        self.assert_allowed(self.hook(self.spawn("builder-up")))
+        self.assert_denied(self.hook(self.spawn("builder-up")), "owner")
         self.assert_denied(self.hook(), "owner")
 
     def test_task_name_changes_start_a_new_ladder(self):
@@ -287,17 +287,17 @@ class CodexSpawnTests(unittest.TestCase):
         self.assert_allowed(self.hook())
         self.assert_denied(self.hook(), "3")
         self.assert_allowed(self.hook(self.spawn(task="exec-other-helper")))
-        self.assert_denied(self.hook(self.spawn("seat-exec-up", "exec-third-helper")))
+        self.assert_denied(self.hook(self.spawn("builder-up", "exec-third-helper")))
 
     def test_role_family_is_part_of_ladder_identity(self):
         self.assert_allowed(self.hook())
         self.assert_allowed(self.hook())
         self.assert_denied(self.hook(), "3")
-        self.assert_allowed(self.hook(self.spawn("seat-exec-here")))
-        self.assert_allowed(self.hook(self.spawn("seat-exec-here-light")))
-        self.assert_denied(self.hook(self.spawn("seat-exec-here-std")), "3")
-        self.assert_allowed(self.hook(self.spawn("seat-exec-here-up")))
-        self.assert_denied(self.hook(self.spawn("seat-exec-here-up")), "owner")
+        self.assert_allowed(self.hook(self.spawn("builder-in-place")))
+        self.assert_allowed(self.hook(self.spawn("builder-in-place-light")))
+        self.assert_denied(self.hook(self.spawn("builder-in-place-std")), "3")
+        self.assert_allowed(self.hook(self.spawn("builder-in-place-up")))
+        self.assert_denied(self.hook(self.spawn("builder-in-place-up")), "owner")
 
     def test_ladder_survives_event_session_and_nested_agent_changes(self):
         self.assert_allowed(self.hook(event_fields={"session_id": "first-event"}))
@@ -306,7 +306,7 @@ class CodexSpawnTests(unittest.TestCase):
         self.assert_denied(self.hook(event_fields={"session_id": "third-event"}), "3")
 
     def test_non_exec_roles_do_not_advance_exec_ladder(self):
-        for role in ("seat-sweep", "seat-judge", "Explore", "Plan", "general-purpose"):
+        for role in ("sweeper", "judge", "researcher", "planner", "worker"):
             self.assert_allowed(self.hook(self.spawn(role)))
         self.assert_allowed(self.hook())
         self.assert_allowed(self.hook())
@@ -324,7 +324,7 @@ class CodexSpawnTests(unittest.TestCase):
             else:
                 self.assert_denied(result, "3")
         with ThreadPoolExecutor(max_workers=6) as executor:
-            results = list(executor.map(lambda _: self.hook(self.spawn("seat-exec-up")), range(6)))
+            results = list(executor.map(lambda _: self.hook(self.spawn("builder-up")), range(6)))
         allowed = [result for result in results if result.returncode == 0 and
                    (not result.stdout.strip() or '"deny"' not in result.stdout)]
         self.assertEqual(len(allowed), 1, "Concurrent escalations bypassed the owner round")
@@ -368,7 +368,7 @@ class CodexSpawnTests(unittest.TestCase):
                 self.assertNotIn(task.encode(), contents)
 
     def test_environment_and_file_switch_disable_both_hosts(self):
-        claude = {"subagent_type": "seat-exec", "prompt": "TASK helper\nFILES src/helper.py"}
+        claude = {"subagent_type": "builder", "prompt": "TASK helper\nFILES src/helper.py"}
         for via_file in (False, True):
             with self.subTest(via_file=via_file):
                 if via_file:
@@ -393,10 +393,10 @@ class CodexSpawnTests(unittest.TestCase):
             self.assertEqual(self.switch.exists(), action == "off")
             if action == "off":
                 self.assert_silent(self.hook())
-                self.assert_silent(self.hook({"subagent_type": "seat-exec", "prompt": "helper"},
+                self.assert_silent(self.hook({"subagent_type": "builder", "prompt": "helper"},
                                              tool="Agent", guard=CLAUDE_GUARD))
         self.assert_denied(self.hook(), "3")
-        self.assert_allowed(self.hook(self.spawn("seat-exec-up")))
+        self.assert_allowed(self.hook(self.spawn("builder-up")))
 
 
 class CodexRoleTests(unittest.TestCase):

@@ -8,6 +8,8 @@ description: Split independent work into four-line briefs, route each to a suita
 The owner holds the goal, writes briefs, and integrates verified results. Seats do
 bounded work with only the context their brief needs.
 
+See "Delegation defaults" in the Router checkout's README.md for opt-in written guidance with route-derived thresholds.
+
 ## Four split tests
 
 Dispatch a piece only when all four answers are yes:
@@ -54,15 +56,17 @@ OPEN: one unresolved question, or none.
 
 | Work | Seat | Default model |
 | --- | --- | --- |
-| Find, list, count, or summarize evidence | `seat-sweep` | Haiku |
-| Implement one bounded change in its own worktree | `seat-exec` | Sonnet |
-| Execute in an explicitly assigned directory | `seat-exec-here` | Sonnet |
-| Inspect every return independently, in fresh context | `seat-judge` | Opus |
-| Research code for a decision | `Explore` | Sonnet |
-| Propose an implementation plan | `Plan` | Sonnet |
-| Complete other bounded research or implementation | `general-purpose` | Sonnet |
+| Find, list, count, or summarize evidence | `sweeper` | Haiku |
+| Implement one bounded change in its own worktree | `builder` | Sonnet |
+| Execute in an explicitly assigned directory | `builder-in-place` | Sonnet |
+| Inspect every return independently, in fresh context | `judge` | Opus |
+| Research code for a decision | `researcher` | Sonnet |
+| Propose an implementation plan | `planner` | Sonnet |
+| Complete other bounded research or implementation | `worker` | Sonnet |
+| Write focused failing tests | `test-writer` | Sonnet |
+| Update named documentation | `docs-writer` | Sonnet |
 
-`seat-exec` declares `isolation: worktree` on Claude. `seat-exec-here` uses an
+`builder` declares `isolation: worktree` on Claude. `builder-in-place` uses an
 explicitly assigned directory. On Codex, create or use a separately assigned
 worktree before dispatch; there is no Claude isolation argument. Never give
 simultaneous editing seats the same checkout.
@@ -94,18 +98,22 @@ TASK, FILES, BAR, and RETURN here before spawning. Each role's
 before work. Risk words, four-field lint, and prompt `route:` directives are not
 Codex hook checks. Send any extra findings as notes below the four fields.
 
-Keep the exact same `task_name` and base role across retries. Use `seat-exec`
-for the first two accepted attempts, then explicitly choose `seat-exec-up` for
-round three. The same applies to the `seat-exec-here` family. The hook rejects
+Keep the exact same `task_name` and base role across retries. Use `builder`
+for the first two accepted attempts, then explicitly choose `builder-up` for
+round three. The same applies to the `builder-in-place` family. The hook rejects
 upper execution before two accepted standard attempts, rejects standard execution
 on round three, and blocks round four for owner replanning. Switching tier aliases
 cannot reset history; changing sessions or spawning from another agent cannot
 either. Never change task names or role families to evade the cap.
 
+`test-writer` and `docs-writer` use the execution ladder but have no tier files.
+On Claude, their third attempt uses model injection. On Codex, their pinned base
+TOML cannot express the upper attempt; return to the owner after two attempts.
+
 ## Verify every return
 
 The worker first runs its own BAR and returns evidence. The owner checks changed
-paths and the return, then gives a new `seat-judge` only the original brief, the
+paths and the return, then gives a new `judge` only the original brief, the
 return, and the target worktree or change reference. Do this for every return,
 including evidence sweeps. Do not resume an earlier judge or pass it the worker's
 conversation. The author never grades its own work.
@@ -164,3 +172,5 @@ Do not include secrets in briefs, citations, run logs, or returns.
 Run `router off` to disable all routing and context hooks. Run `router on` to
 enable them again, and `router status` to inspect the switch. `ROUTER_OFF=1` is
 also a process-level kill switch. Disabling routing does not cancel running seats.
+
+Use `router auto off|suggest|nudge|enforce` to choose automatic routing (default `nudge`); `suggest` adds role hints and `enforce` requires a spawn after main-session read or edit thresholds.

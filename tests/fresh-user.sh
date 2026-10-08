@@ -68,14 +68,14 @@ def agent_fields(path):
 
 def assert_routing(folder, environment):
     event = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "cwd": str(home),
-             "tool_input": {"subagent_type": "seat-exec", "description": "Update documentation",
+             "tool_input": {"subagent_type": "builder", "description": "Update documentation",
                             "prompt": "TASK update documentation\nFILES README.md\nBAR true\nRETURN five lines"}}
     guard = folder / "hooks/router/spawn_guard.py"
     result = run([sys.executable, str(guard)], environment=environment, input_text=json.dumps(event))
     check(not result.stderr, f"installed spawn guard wrote an error: {result.stderr}")
     output = json.loads(result.stdout)["hookSpecificOutput"]
-    check(output["updatedInput"]["subagent_type"] == "seat-exec-std", "seat-exec did not select its standard tier")
-    check(output["updatedInput"]["model"] == "sonnet", "seat-exec did not select sonnet")
+    check(output["updatedInput"]["subagent_type"] == "builder-std", "builder did not select its standard tier")
+    check(output["updatedInput"]["model"] == "sonnet", "builder did not select sonnet")
     for model in ("gpt-6-astra", "claude-opus-5-5"):
         for directive in ("", "\nroute: up novel"):
             upper = dict(event, tool_input=dict(subagent_type="unlisted-role", model=model,
@@ -103,8 +103,8 @@ try:
     check(not claude.exists(), "dry-run wrote files in the fresh HOME")
     install()
     expected_files = ["hooks/router/spawn_guard.py", "hooks/router/context_guard.py",
-                      "hooks/router/common.py", "hooks/router/routes.json", "agents/seat-exec.md",
-                      "agents/seat-exec-std.md", "agents/seat-judge.md", "agents/seat-sweep.md",
+                      "hooks/router/common.py", "hooks/router/routes.json", "agents/builder.md",
+                      "agents/builder-std.md", "agents/judge.md", "agents/sweeper.md",
                       "skills/dispatch/SKILL.md", "router/bin/router", "router/bin/wait-until.sh",
                       "router/bin/cite-check.py", "router/bin/close-lane.sh", "router/bin/dispatch-log.py"]
     for relative in expected_files:
@@ -117,17 +117,17 @@ try:
             fields = agent_fields(agent)
             check(fields.get("name") == tier["agent"], f"wrong name in {agent.name}")
             check(fields.get("model") == tier["model"], f"wrong model in {agent.name}")
-            if base == "seat-exec":
+            if base == "builder":
                 check(fields.get("isolation") == "worktree", f"missing worktree isolation in {agent.name}")
-    for name, model in {"seat-sweep": "haiku", "seat-exec": "sonnet", "seat-exec-here": "sonnet",
-                        "seat-judge": "opus", "Explore": "sonnet", "Plan": "sonnet", "general-purpose": "sonnet"}.items():
+    for name, model in {"sweeper": "haiku", "builder": "sonnet", "builder-in-place": "sonnet",
+                        "judge": "opus", "researcher": "sonnet", "planner": "sonnet", "worker": "sonnet"}.items():
         agent = claude / "agents" / (name + ".md")
         check(agent.is_file(), f"missing base agent or built-in override: {name}")
         fields = agent_fields(agent)
         check(fields.get("name") == name, f"wrong base name in {agent.name}")
         check(fields.get("model") == model, f"wrong base model in {agent.name}")
-        if name == "seat-exec":
-            check(fields.get("isolation") == "worktree", "seat-exec lacks worktree isolation")
+        if name == "builder":
+            check(fields.get("isolation") == "worktree", "builder lacks worktree isolation")
     settings = claude / "settings.json"
     config = json.loads(settings.read_text())
     spawn_hooks = hooks_for(config, "spawn_guard.py")
@@ -150,7 +150,7 @@ try:
     check(json.loads(settings.read_text()) == config, "reinstall removed user settings")
     user_file = claude / "agents/user-agent.md"
     user_file.write_text("User content\n")
-    modified = claude / "agents/seat-sweep.md"
+    modified = claude / "agents/sweeper.md"
     modified.write_text(modified.read_text() + "\nLocal note.\n")
     collision = install(expected=1)
     check("refusing to overwrite" in collision.stderr, "reinstall did not explain the modified-file collision")
@@ -187,7 +187,7 @@ try:
     custom_settings = json.loads((custom / "settings.json").read_text())
     command = hooks_for(custom_settings, "spawn_guard.py")[0][1]["hooks"][0]["command"]
     event = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input":
-             {"subagent_type": "seat-exec", "prompt": "TASK custom path\nFILES README.md\nBAR true\nRETURN five lines"}}
+             {"subagent_type": "builder", "prompt": "TASK custom path\nFILES README.md\nBAR true\nRETURN five lines"}}
     configured = run(["bash", "-c", command], environment=dict(os.environ), input_text=json.dumps(event))
     check(json.loads(configured.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet",
           "custom hook command failed with spaces or a quote in CLAUDE_HOME")

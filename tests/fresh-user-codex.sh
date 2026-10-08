@@ -62,7 +62,7 @@ def router_hook(config):
 
 def assert_routing(folder, environment):
     event = {"hook_event_name": "PreToolUse", "tool_name": "collaborationspawn_agent", "cwd": str(home),
-             "session_id": "fresh-codex", "tool_input": {"agent_type": "seat-sweep", "task_name": "sweep_fresh",
+             "session_id": "fresh-codex", "tool_input": {"agent_type": "sweeper", "task_name": "sweep_fresh",
              "message": "gAAAA-encrypted-test"}}
     config = json.loads((folder / "hooks.json").read_text())
     command = router_hook(config)
@@ -86,7 +86,7 @@ def assert_routing(folder, environment):
     routes["router"]["modes"] = dict.fromkeys(routes["router"]["modes"], "off")
     mode_path = home / "modes-off.json"
     mode_path.write_text(json.dumps(routes))
-    for fields in ({"agent_type": "unknown-role"}, {}, {"agent_type": "seat-exec", "model": "gpt-6-astra"}):
+    for fields in ({"agent_type": "unknown-role"}, {}, {"agent_type": "builder", "model": "gpt-6-astra"}):
         disabled_event = dict(event, tool_input=dict(fields, task_name="mode-check", message="encrypted:test"))
         result = run(["bash", "-c", command], environment=dict(environment, ROUTES_JSON=str(mode_path)),
                      input_text=json.dumps(disabled_event))
@@ -121,8 +121,8 @@ try:
                      "hooks/router/routes.json", "skills/dispatch/SKILL.md", "router/bin/router",
                      "router/bin/close-lane.sh"):
         check((codex / relative).is_file(), f"missing installed Codex file: {relative}")
-    for role, model, effort in (("seat-sweep", "gpt-6-luna", "low"), ("seat-exec", "gpt-6-sol", "medium"),
-                                ("seat-exec-up", "gpt-6-astra", "high"), ("seat-judge", "gpt-6-astra", "high")):
+    for role, model, effort in (("sweeper", "gpt-6-luna", "low"), ("builder", "gpt-6-sol", "medium"),
+                                ("builder-up", "gpt-6-astra", "high"), ("judge", "gpt-6-astra", "high")):
         contents = (codex / "agents" / (role + ".toml")).read_text()
         check(re.search(r'^model\s*=\s*"' + re.escape(model) + r'"\s*$', contents, re.M), f"missing model pin for {role}")
         check(re.search(r'^model_reasoning_effort\s*=\s*"' + effort + r'"\s*$', contents, re.M), f"missing effort pin for {role}")
@@ -141,7 +141,7 @@ try:
     hooks_file.write_text(json.dumps(config))
     install()
     check(json.loads(hooks_file.read_text()) == config, "Codex reinstall removed user configuration")
-    modified = codex / "agents/seat-sweep.toml"
+    modified = codex / "agents/sweeper.toml"
     modified.write_text(modified.read_text() + "\n# Local note.\n")
     collision = install(expected=1)
     check("refusing to overwrite" in collision.stderr, "Codex reinstall did not protect an edited role")

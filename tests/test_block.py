@@ -31,21 +31,21 @@ def contract_errors(routes):
     errors = []
     types = routes["router"]["types"]
     tiers = routes["tiers"]
-    expected = {"seat-sweep": "sweep", "seat-exec": "exec", "seat-exec-here": "exec",
-                "seat-judge": "judge", "Explore": "research", "Plan": "research",
-                "general-purpose": "worker"}
+    expected = {"sweeper": "sweep", "builder": "exec", "builder-in-place": "exec",
+                "judge": "judge", "researcher": "research", "planner": "research",
+                "worker": "worker"}
     for name, kind in expected.items():
         if types.get(name, {}).get("class") != kind:
             errors.append(f"{name} class differs from the contract")
-    if tiers["seat-sweep"]["light"]["model"] != "haiku":
+    if tiers["sweeper"]["light"]["model"] != "haiku":
         errors.append("sweep default must use haiku")
-    for name in ("seat-exec", "seat-exec-here"):
+    for name in ("builder", "builder-in-place"):
         for tier in ("light", "std"):
             if tiers[name][tier]["model"] != "sonnet":
                 errors.append(f"{name} {tier} must use sonnet")
         if tiers[name]["up"]["model"] != "opus":
             errors.append(f"{name} up must use opus")
-    if any(spec["model"] != "opus" for spec in tiers["seat-judge"].values()):
+    if any(spec["model"] != "opus" for spec in tiers["judge"].values()):
         errors.append("every judge tier must use opus")
     if routes["router"]["modes"].get("ladder") != "enforce":
         errors.append("ladder must enforce by default")
@@ -81,9 +81,9 @@ class ContractTests(unittest.TestCase):
 
     def test_contract_rejects_drift_with_specific_diagnostics(self):
         mutations = [
-            (lambda r: r["tiers"]["seat-sweep"]["light"].update(model="sonnet"), "sweep"),
-            (lambda r: r["tiers"]["seat-exec"]["std"].update(model="haiku"), "seat-exec std"),
-            (lambda r: r["tiers"]["seat-judge"]["up"].update(model="sonnet"), "judge"),
+            (lambda r: r["tiers"]["sweeper"]["light"].update(model="sonnet"), "sweep"),
+            (lambda r: r["tiers"]["builder"]["std"].update(model="haiku"), "builder std"),
+            (lambda r: r["tiers"]["judge"]["up"].update(model="sonnet"), "judge"),
             (lambda r: r["router"]["modes"].update(ladder="shadow"), "ladder"),
             (lambda r: r["router"]["up_codes"].append("unknown"), "up codes"),
         ]
@@ -97,23 +97,23 @@ class ContractTests(unittest.TestCase):
 
     def test_declared_agent_names_cover_the_public_seats_and_tiers(self):
         expected = {f"{seat}-{tier}" for seat in
-                    ("seat-sweep", "seat-exec", "seat-exec-here", "seat-judge")
+                    ("sweeper", "builder", "builder-in-place", "judge")
                     for tier in ("light", "std", "up")}
-        expected.update(f"{base}-{tier}" for base in ("explore", "plan", "worker")
+        expected.update(f"{base}-{tier}" for base in ("researcher", "planner", "worker")
                         for tier in ("std", "up"))
         actual = [spec["agent"] for levels in self.routes["tiers"].values() for spec in levels.values()]
         self.assertEqual(set(actual), expected)
         self.assertEqual(len(actual), len(expected), "duplicate tier agent names")
 
     def test_default_models_match_the_contract(self):
-        for agent, model in (("seat-sweep", "haiku"), ("seat-exec", "sonnet"),
-                             ("seat-exec-here", "sonnet"), ("seat-judge", "opus"),
-                             ("Explore", "sonnet"), ("Plan", "sonnet"),
-                             ("general-purpose", "sonnet")):
+        for agent, model in (("sweeper", "haiku"), ("builder", "sonnet"),
+                             ("builder-in-place", "sonnet"), ("judge", "opus"),
+                             ("researcher", "sonnet"), ("planner", "sonnet"),
+                             ("worker", "sonnet")):
             with self.subTest(agent=agent):
                 updated = self.decide(agent)
                 self.assertEqual(updated["model"], model)
-                if agent == "seat-exec":
+                if agent == "builder":
                     self.assertEqual(updated.get("isolation"), "worktree")
                 else:
                     self.assertNotIn("isolation", updated)
@@ -129,16 +129,16 @@ class ContractTests(unittest.TestCase):
                     updated = self.decide(spec["agent"], prompt, prior=prior, resume="previous-context")
                     self.assertEqual(updated["model"], spec["model"])
                     self.assertEqual(updated["subagent_type"], spec["agent"])
-                    if base == "seat-judge":
+                    if base == "judge":
                         self.assertNotIn("resume", updated)
-                    if base == "seat-exec":
+                    if base == "builder":
                         self.assertEqual(updated.get("isolation"), "worktree")
                     else:
                         self.assertNotIn("isolation", updated)
 
     def test_exec_brief_ladder_overrides_early_escalation(self):
         prompt = "route: up risk\nTASK Repair parser\nFILES src/parser.py"
-        request = {"subagent_type": "seat-exec-up", "model": "opus", "prompt": prompt}
+        request = {"subagent_type": "builder-up", "model": "opus", "prompt": prompt}
         for prior in ([], [{"round": 1}]):
             result = self.spawn.decide(request, self.routes, self.modes, prior)
             self.assertEqual(result["decision"], "rewrite")
@@ -166,7 +166,7 @@ class ContractTests(unittest.TestCase):
 
     def test_decisions_do_not_mutate_caller_data_or_write_state(self):
         original_routes = copy.deepcopy(self.routes)
-        request = {"subagent_type": "seat-judge", "prompt": "Check result", "model": "haiku",
+        request = {"subagent_type": "judge", "prompt": "Check result", "model": "haiku",
                    "resume": "previous-context", "description": "Review", "metadata": {"key": "value"}}
         original_request = copy.deepcopy(request)
         result = self.spawn.decide(request, self.routes, self.modes, [])

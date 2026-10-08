@@ -1,14 +1,22 @@
-## Router delegation
+<!-- router:defaults:start (managed by router install --with-defaults; edits here are replaced) -->
+## Delegation defaults
 
-- Use the `dispatch` skill when work splits cleanly, fits a four-line brief, has
-  an independent verifier, and is worth the extra model calls.
-- Every brief has TASK, FILES, BAR, and RETURN. Workers return five lines:
-  CHANGED / BAR / OUTPUT / NOT DONE / OPEN.
-- Send evidence sweeps to `seat-sweep` (Haiku), bounded builds to `seat-exec`
-  (Sonnet, its own worktree), and every return to a fresh `seat-judge` (Opus).
-- Let the router choose the model and tier. The judge reads the actual work,
-  re-runs the BAR, returns PASS or SEND_BACK, and never fixes it.
-- Retry a failed execution brief on Sonnet once. Next use `route: up ladder`
-  for one Opus attempt. After that, return the unresolved brief to the owner.
-- Keep FILES narrow, preserve unrelated work, and never include secrets in returns.
-- `router off` disables the hooks; `router on` enables them again.
+- Do it here when it is one question, one file, one answer. Delegating that
+  costs more than doing it.
+- The main session plans, writes briefs and checks results. Hand work to a
+  role when it touches more than 3 files, means reading a log or transcript,
+  or needs more than 2 commands of digging. After 5 reads in a row the router
+  reminds you.
+- Route by kind of work: find, list, count -> sweeper. Evidence for a decision
+  -> researcher. Critique a plan -> planner. Change code -> builder (own
+  worktree) or builder-in-place (this directory). Several steps -> worker.
+  Failing tests first -> test-writer. Docs -> docs-writer.
+- Every brief has TASK, FILES, BAR, RETURN. Send independent briefs together.
+- Check every build: run the BAR yourself first; if it passes, send the work
+  to a fresh judge. The author never judges its own work.
+- A failed brief goes back once with the judge's findings, then once to the
+  upper tier with `route: up ladder`, then back to you to replan.
+- Returns stay under 1500 characters for builders and judges, 3000 for
+  sweepers, 5000 for researchers, planners and workers; anything longer goes
+  to a file and the return names it.
+<!-- router:defaults:end -->

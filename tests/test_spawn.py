@@ -59,7 +59,7 @@ class SpawnTests(unittest.TestCase):
                               cwd=self.root, env=environment)
 
     @staticmethod
-    def input(prompt=BRIEF, agent="seat-exec", **fields):
+    def input(prompt=BRIEF, agent="builder", **fields):
         return dict(subagent_type=agent, prompt=prompt, description="Implement the helper", **fields)
 
     def updated(self, result):
@@ -118,21 +118,21 @@ class SpawnTests(unittest.TestCase):
                     got = self.updated(self.run_hook(ti))
                     self.assertEqual(got["subagent_type"], spec["agent"])
                     self.assertEqual(got["model"], spec["model"])
-                    if base == "seat-exec":
+                    if base == "builder":
                         self.assertEqual(got["isolation"], "worktree")
                     else:
                         self.assertNotIn("isolation", got)
 
     def test_default_model_per_class(self):
-        expected = {"seat-sweep": "haiku", "seat-exec": "sonnet", "seat-exec-here": "sonnet",
-                    "seat-judge": "opus", "Explore": "sonnet", "Plan": "sonnet", "general-purpose": "sonnet"}
+        expected = {"sweeper": "haiku", "builder": "sonnet", "builder-in-place": "sonnet",
+                    "judge": "opus", "researcher": "sonnet", "planner": "sonnet", "worker": "sonnet"}
         for agent, model in expected.items():
             with self.subTest(agent=agent):
                 ti = self.input("Find the relevant files.", agent)
                 self.assertEqual(self.updated(self.run_hook(ti))["model"], model)
 
     def test_judge_is_opus_and_fresh_for_every_tier(self):
-        for agent in ("seat-judge", "seat-judge-light", "seat-judge-std", "seat-judge-up"):
+        for agent in ("judge", "judge-light", "judge-std", "judge-up"):
             for model in ("haiku", "sonnet", "opus"):
                 with self.subTest(agent=agent, model=model):
                     ti = self.input(agent=agent, model=model, resume="previous-review")
@@ -144,14 +144,14 @@ class SpawnTests(unittest.TestCase):
         ti = self.input("Implement the helper.", isolation="shared",
                         run_in_background=True, name="helper", max_turns=8)
         updated = self.updated(self.run_hook(ti))
-        self.assertEqual(updated, dict(ti, subagent_type="seat-exec-std",
+        self.assertEqual(updated, dict(ti, subagent_type="builder-std",
                                        model="sonnet", isolation="worktree"))
 
     def test_exec_here_does_not_add_worktree_isolation(self):
         for suffix in ("", "-light", "-std", "-up"):
             for fields in ({}, {"isolation": "shared"}, {"isolation": "worktree"}):
                 with self.subTest(suffix=suffix, fields=fields):
-                    ti = self.input(agent="seat-exec-here" + suffix, **fields)
+                    ti = self.input(agent="builder-in-place" + suffix, **fields)
                     result = spawn_guard.decide(ti, ROUTES, ROUTES["router"]["modes"], [])
                     updated = result["updated"]
                     self.assertEqual("isolation" in updated, "isolation" in ti)
@@ -159,7 +159,7 @@ class SpawnTests(unittest.TestCase):
 
     def test_every_exec_prompt_obeys_the_ladder_in_decide(self):
         for prompt in ("fix it", "task: fix it", ""):
-            for agent in ("seat-exec", "seat-exec-here-up"):
+            for agent in ("builder", "builder-in-place-up"):
                 with self.subTest(prompt=prompt, agent=agent):
                     ti = self.input("route: up ladder\n" + prompt, agent, model="opus")
                     prior = []
@@ -200,7 +200,7 @@ class SpawnTests(unittest.TestCase):
         self.assert_blocked(self.run_hook(), "Round 3", "route: up ladder")
         got = self.updated(self.run_hook(self.input(BRIEF + "\nroute: up ladder")))
         self.assertEqual(got["model"], "opus")
-        self.assertEqual(got["subagent_type"], "seat-exec-up")
+        self.assertEqual(got["subagent_type"], "builder-up")
         self.assert_blocked(self.run_hook(self.input(BRIEF + "\nroute: up ladder")), "planning", "owner")
 
     def test_ladder_requires_exact_known_escalation_code(self):
@@ -213,18 +213,18 @@ class SpawnTests(unittest.TestCase):
 
     def test_early_model_and_tier_requests_cannot_skip_ladder(self):
         for suffix in ("\nroute: up ladder", "\nroute: up security"):
-            got = self.updated(self.run_hook(self.input(BRIEF + suffix, "seat-exec-up", model="opus")))
+            got = self.updated(self.run_hook(self.input(BRIEF + suffix, "builder-up", model="opus")))
             self.assertEqual(got["model"], "sonnet")
-            self.assertEqual(got["subagent_type"], "seat-exec-std")
+            self.assertEqual(got["subagent_type"], "builder-std")
         self.assertEqual(self.updated(self.run_hook(self.input(BRIEF + "\nroute: up ladder")))["model"], "opus")
 
     def test_light_attempt_consumes_a_ladder_round(self):
         first = self.updated(self.run_hook(self.input(BRIEF + "\nroute: light")))
         self.assertEqual(first["model"], "sonnet")
-        self.assertEqual(first["subagent_type"], "seat-exec-light")
+        self.assertEqual(first["subagent_type"], "builder-light")
         second = self.updated(self.run_hook(self.input(BRIEF + "\nroute: light")))
         self.assertEqual(second["model"], "sonnet")
-        self.assertEqual(second["subagent_type"], "seat-exec-std")
+        self.assertEqual(second["subagent_type"], "builder-std")
         self.assert_blocked(self.run_hook(), "Round 3")
 
     def test_ladder_hash_normalizes_whitespace_and_ignores_other_sections(self):
@@ -242,19 +242,19 @@ class SpawnTests(unittest.TestCase):
                 self.assertEqual(self.updated(self.run_hook(self.input(brief)))["model"], "sonnet")
 
     def test_ladder_is_shared_across_exec_agents_and_event_sessions(self):
-        self.updated(self.run_hook(self.input(agent="seat-exec-here")))
-        self.updated(self.run_hook(self.input(agent="seat-exec-std"), event_fields={"agent_id": "nested-worker"}))
-        self.assert_blocked(self.run_hook(self.input(agent="seat-exec-here-light")), "Round 3")
+        self.updated(self.run_hook(self.input(agent="builder-in-place")))
+        self.updated(self.run_hook(self.input(agent="builder-std"), event_fields={"agent_id": "nested-worker"}))
+        self.assert_blocked(self.run_hook(self.input(agent="builder-in-place-light")), "Round 3")
 
     def test_non_exec_calls_do_not_consume_exec_attempts(self):
-        for agent in ("seat-sweep", "seat-judge", "Explore", "Plan", "general-purpose"):
+        for agent in ("sweeper", "judge", "researcher", "planner", "worker"):
             self.updated(self.run_hook(self.input(agent=agent)))
         self.assertEqual(self.updated(self.run_hook())["model"], "sonnet")
         self.assertEqual(self.updated(self.run_hook())["model"], "sonnet")
         self.assert_blocked(self.run_hook(), "Round 3")
 
     def test_already_correct_calls_still_consume_ladder_attempts(self):
-        ti = self.input(agent="seat-exec-std", model="sonnet", isolation="worktree")
+        ti = self.input(agent="builder-std", model="sonnet", isolation="worktree")
         self.assert_unchanged(self.run_hook(ti))
         self.assert_unchanged(self.run_hook(ti))
         self.assert_blocked(self.run_hook(ti), "Round 3")
@@ -280,9 +280,9 @@ class SpawnTests(unittest.TestCase):
             self.assert_blocked(result, "planning", "owner")
 
     def test_unknown_up_code_is_ignored(self):
-        ti = self.input("Find the relevant files.\nroute: up unknown", "seat-sweep")
+        ti = self.input("Find the relevant files.\nroute: up unknown", "sweeper")
         got = self.updated(self.run_hook(ti))
-        self.assertEqual(got["subagent_type"], "seat-sweep-light")
+        self.assertEqual(got["subagent_type"], "sweeper-light")
         self.assertEqual(got["model"], "haiku")
 
     def test_switch_file_and_environment_make_hook_silent(self):

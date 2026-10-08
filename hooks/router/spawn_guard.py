@@ -41,7 +41,7 @@ def main() -> int:
 
     res = common.record_spawn(brief, c, choose)
     common.log("spawns", {key: res[key] for key in
-                         ("decision", "rule", "run_type", "run_model", "class", "tier", "brief", "round", "notes", "shadow")})
+                         ("decision", "rule", "asked_type", "run_type", "run_model", "class", "tier", "brief", "round", "notes", "shadow")})
     if res["decision"] == "block":
         sys.stderr.write(res["message"] + "\n")
         return 2

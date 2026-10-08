@@ -233,7 +233,7 @@ class ScriptTests(unittest.TestCase):
     def log(self, *arguments):
         return self.run_script("dispatch-log.py", *arguments)
 
-    def add_run(self, model="sonnet", seat="seat-exec", *extra):
+    def add_run(self, model="sonnet", seat="builder", *extra):
         return self.log("add", "--family", "Feature", "--seat", seat,
                         "--model", model, "--verdict", "SEND_BACK", *extra)
 
@@ -242,16 +242,16 @@ class ScriptTests(unittest.TestCase):
         self.assert_code(self.add_run(), 0)
         self.assert_code(self.add_run(), 3)
         self.assert_code(self.add_run("opus"), 3)
-        self.assert_code(self.add_run("opus", "seat-exec-up", "--escalated"), 0)
-        self.assert_code(self.add_run("opus", "seat-exec-up", "--escalated"), 3)
+        self.assert_code(self.add_run("opus", "builder-up", "--escalated"), 0)
+        self.assert_code(self.add_run("opus", "builder-up", "--escalated"), 3)
         self.assertEqual(self.log("rounds", "feature").stdout.strip(), "3")
         rows = [json.loads(line) for line in (self.tmp / "state/runs.jsonl").read_text().splitlines()]
         self.assertEqual([row["round"] for row in rows], [1, 2, 3])
 
     def test_log_judges_and_blocked_no_edits_do_not_count(self):
-        self.assert_code(self.add_run("opus", "seat-judge"), 0)
-        self.assert_code(self.add_run("haiku", "seat-sweep"), 0)
-        self.assert_code(self.log("add", "--family", "Feature", "--seat", "seat-exec",
+        self.assert_code(self.add_run("opus", "judge"), 0)
+        self.assert_code(self.add_run("haiku", "sweeper"), 0)
+        self.assert_code(self.log("add", "--family", "Feature", "--seat", "builder",
                                   "--model", "sonnet", "--verdict", "BLOCKED", "--no-edits"), 0)
         self.assertEqual(self.log("rounds", "feature").stdout.strip(), "0")
         self.assert_code(self.add_run(), 0)

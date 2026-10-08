@@ -4,13 +4,19 @@
       {
         "matcher": "Agent|Task",
         "hooks": [
-          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/spawn_guard.py\""}
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/router/spawn_guard.py\""
+          }
         ]
       },
       {
-        "matcher": "Read|Grep|Glob|Bash|SubagentHandback",
+        "matcher": "Read|Grep|Glob|Bash|Edit|Write|SubagentHandback",
         "hooks": [
-          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""}
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""
+          }
         ]
       }
     ],
@@ -18,7 +24,10 @@
       {
         "matcher": ".*",
         "hooks": [
-          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""}
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""
+          }
         ]
       }
     ],
@@ -26,7 +35,21 @@
       {
         "matcher": ".*",
         "hooks": [
-          {"type": "command", "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""}
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/router/context_guard.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/router/prompt_hint.py\""
+          }
         ]
       }
     ]

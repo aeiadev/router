@@ -64,7 +64,7 @@ bash install.sh
 export PATH="$CLAUDE_HOME/router/bin:$PATH"
 ```
 
-Review [the settings example](examples/settings.example.json) for the hooks block and add [the short instruction snippet](examples/CLAUDE.md.snippet) to your own `CLAUDE.md` if useful. The installer does not edit `CLAUDE.md`. Start a new Claude Code session after installation so the agents and skill are loaded.
+Review [the settings example](examples/settings.example.json) for the hooks block. Without `--with-defaults`, the installer never edits `CLAUDE.md` or `AGENTS.md`; with it, see [Delegation defaults](#delegation-defaults). If pasting [the instruction snippet](examples/CLAUDE.md.snippet) by hand, paste without the markers. Start a new Claude Code session after installation so the agents and skill are loaded.
 
 ```bash
 bash install.sh --host both --uninstall --dry-run
@@ -82,7 +82,7 @@ BAR timeout 60 python3 tests/test_parser.py
 RETURN Five lines: CHANGED / BAR / OUTPUT / NOT DONE / OPEN.
 ```
 
-Use paths relative to the repository root. Keep `FILES` narrow and make `BAR` a real command that proves the task. The worker runs it, then a fresh `seat-judge` runs it again in the result's worktree. A sweep can use the same format with read-only files and a check that verifies its answer.
+Use paths relative to the repository root. Keep `FILES` narrow and make `BAR` a real command that proves the task. The worker runs it, then a fresh `judge` runs it again in the result's worktree. A sweep can use the same format with read-only files and a check that verifies its answer.
 
 For example, send this brief to Claude Code with `/dispatch`:
 
@@ -93,15 +93,42 @@ BAR timeout 60 python3 tests/test_parser.py
 RETURN Five lines: CHANGED / BAR / OUTPUT / NOT DONE / OPEN.
 ```
 
-In Codex, send the same brief after invoking `$dispatch`. This simple check routes to the sweep seat: Claude Code's hook rewrites `seat-sweep` to `seat-sweep-light` (Haiku); Codex keeps `seat-sweep` (gpt-6-luna, low). Each decision is logged with `run_type` and `tier` in `~/.local/state/claude-router/spawns.jsonl` by default (`ROUTER_STATE` or `XDG_STATE_HOME` moves it).
+In Codex, send the same brief after invoking `$dispatch`. This simple check routes to the sweep seat: Claude Code's hook rewrites `sweeper` to `sweeper-light` (Haiku); Codex keeps `sweeper` (gpt-6-luna, low). Each decision is logged with `run_type` and `tier` in `~/.local/state/claude-router/spawns.jsonl` by default (`ROUTER_STATE` or `XDG_STATE_HOME` moves it).
 
 | Seat | Claude default | Codex default | Job |
 | --- | --- | --- | --- |
-| `seat-sweep` | Haiku | gpt-6-luna, low | Bounded searches, read-only |
-| `seat-exec` | Sonnet | gpt-6-sol, medium | Build in an isolated worktree |
-| `seat-exec-here` | Sonnet | gpt-6-sol, medium | Execute in an assigned directory |
-| `seat-judge` | Opus | gpt-6-astra, high | Fresh verification, read-only |
-| `Explore`, `Plan`, `general-purpose` | Sonnet | gpt-6-sol, medium | Research, planning, bounded work |
+| `sweeper` | Haiku | gpt-6-luna, low | Bounded searches, read-only |
+| `builder` | Sonnet | gpt-6-sol, medium | Build in an isolated worktree |
+| `builder-in-place` | Sonnet | gpt-6-sol, medium | Execute in an assigned directory |
+| `judge` | Opus | gpt-6-astra, high | Fresh verification, read-only |
+| `researcher`, `planner`, `worker` | Sonnet | gpt-6-sol, medium | Research, planning, bounded work |
+| `test-writer`, `docs-writer` | Sonnet | gpt-6-sol, medium | Focused tests and documentation; execution class, no tier files |
+
+### Renamed in 0.2
+
+| Old | New |
+| --- | --- |
+| `seat-exec` | `builder` |
+| `seat-exec-here` | `builder-in-place` |
+| `seat-judge` | `judge` |
+| `seat-sweep` | `sweeper` |
+| `general-purpose` | `worker` |
+| `Explore` | `researcher` |
+| `Plan` | `planner` |
+
+Old names and their existing tier variants are deprecated aliases until a later
+release. They share classification, tier rules and ladder history with the new
+names. `worker-std` and `worker-up` keep their names and tiers. The `redirect`
+mode governs compatibility routing. Codex rejects an alias without an installed
+TOML and names the canonical role to retry; rejected calls consume no round.
+Spawn logs record both `asked_type` and `run_type`.
+
+The writer roles have no tier files. Claude injects their ladder model directly;
+Codex returns them to the owner when round three needs an upper role.
+
+The nine base roles and base Codex TOMLs are shared byte for byte with Harness.
+Both installers claim identical shared files. Uninstall keeps shared files while
+the other package claims them, including when its manifest cannot be validated.
 
 On Codex, read-only behavior and worktree isolation are requested by the role's instructions, not enforced.
 As of Codex CLI 0.156, role TOMLs ignore `sandbox_mode`, `default_permissions`,
@@ -113,7 +140,7 @@ profile.
 
 The route table also names light, standard and upper tiers. Claude agent frontmatter
 matches that table. Codex has a TOML for every corresponding role: light sweeps use
-luna/low, standard sweeps use sol/medium, and upper roles including `seat-exec-up`
+luna/low, standard sweeps use sol/medium, and upper roles including `builder-up`
 use astra/high. All judge tiers use astra/high. These are editable defaults: change
 `model` and `model_reasoning_effort` in the installed role TOML, keeping its intended
 tier. Add any new upper-tier or judge model name to `router.top_tier_models` in the
@@ -147,24 +174,92 @@ A fourth attempt is blocked and goes back to the owner for replanning. The hooks
 
 Explicit upper-tier reasons are `risk`, `security`, `novel`, `cross-cutting` and `ladder`. The execution ladder takes precedence over an early escalation request. On Claude, a judge always runs on Opus and has any resume request removed.
 
-On Codex, preserve `task_name` across retries and use `seat-exec` for the first two
-accepted attempts, then `seat-exec-up` for attempt three. With the ladder enforced,
+On Codex, preserve `task_name` across retries and use `builder` for the first two
+accepted attempts, then `builder-up` for attempt three. With the ladder enforced,
 the execution upper role itself is the explicit ladder request; a `route:` line inside the encrypted message has no
 hook effect. An early upper role is denied with the required role to retry. A
 standard role on round three and every execution role on round four are denied.
 Rejected calls never consume rounds. Judges do not consume execution rounds.
 
-Non-execution upper roles (`worker-up`, `seat-sweep-up`, `explore-up`, and `plan-up`)
+Non-execution upper roles (`worker-up`, `sweeper-up`, `researcher-up`, and `planner-up`)
 do not supply an up code. Both hosts reject them with `up-without-code` when
 `block_model` is enforced and no valid code is visible. Codex cannot read a code
 inside its encrypted message, so these roles cannot satisfy that check. Disabling
 or shadowing the ladder does not bypass this independent `block_model` rule.
 
 The shared core hashes `task_name` plus canonical `agent_type` for Codex. All tier
-aliases normalize to their base role, so `seat-exec`, `seat-exec-std`, and
-`seat-exec-up` share history. Different base roles have separate history; do not
+aliases normalize to their base role, so `builder`, `builder-std`, and
+`builder-up` share history. Different base roles have separate history; do not
 switch roles or rename tasks to evade the cap. History survives parent-agent and
 session changes, as on Claude. Use distinct names for genuinely different tasks.
+
+## Delegation defaults
+
+Written delegation guidance is opt-in. Install it with
+`bash install.sh --host both --with-defaults` (or select `claude` or `codex`).
+Add `--dry-run` to preview changes. Without `--with-defaults`, installation never
+touches your instruction files.
+
+The block goes into `$CLAUDE_HOME/CLAUDE.md` or `$CODEX_HOME/AGENTS.md`, defaulting
+to `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`. It describes when to delegate,
+which roles to use, four-line briefs, independent judging, retries and short returns.
+Codex guidance names `$dispatch`, `spawn_agent` and a stable `task_name`.
+The [Claude example](examples/CLAUDE.md.snippet) and
+[Codex example](examples/CODEX.md.snippet) show the default nudge wording.
+
+Numbers are rendered from `hooks/router/routes.json`: `context.files_threshold`,
+`context.command_threshold`, `context.chain.first` and return caps for each role.
+The command threshold is written guidance; hooks count reads and edited files.
+`router auto enforce` adds the enforcement clause. Every `router auto <mode>`
+re-renders existing opted-in blocks for the known host homes using their installed routes.
+If you delete the block or file, auto leaves it alone and prints a reinstall hint.
+Keep custom `CLAUDE_HOME` and `CODEX_HOME` exported so both can be found.
+
+Re-run installation with `--with-defaults` to update the managed text from the
+templates. Only the range between `<!-- router:defaults:start ... -->` and
+`<!-- router:defaults:end -->`, including those markers, is replaced. Outside
+bytes are preserved. Appending after text without a final newline adds a separator
+that uninstall removes. Existing instruction files get a `.router-backup-*` copy
+before the first change, and the installer prints its path. Missing files are created
+only by installation with `--with-defaults`; broken or duplicated marker
+pairs stop the operation before changes. Edits inside the block are replaced.
+
+`bash install.sh --host both --uninstall` removes installed defaults and their
+markers. It deletes an instruction file only if Router created it and it becomes
+empty; user text and backups remain.
+
+## Automatic routing
+
+`router auto` prints the current mode. The default is `nudge`; stronger routing
+and prompt suggestions are opt-in. Switch with `router auto off|suggest|nudge|enforce`:
+
+| Mode | Behavior |
+| --- | --- |
+| `off` | No prompt hints, chain notes or automatic read/edit blocks. Spawn rules, `large_read` and return caps keep their own modes. |
+| `suggest` | The nudge behavior plus one role hint on matching prompts of at least 20 characters. Slash commands are skipped. |
+| `nudge` | The existing chain note, using `context.chain` thresholds and the `chain_note` rule mode. |
+| `enforce` | In the main session, blocks the next Read/Grep/Glob/Bash/Edit/Write after five consecutive read-type calls or edits to more than three distinct files since a spawn. Spawn the named role, or run `router auto nudge` to relax it. |
+
+The thresholds are `context.chain.first` and `context.files_threshold` in the
+route table. An accepted main-session spawn resets both enforcement counters;
+non-read calls reset the consecutive read counter before a threshold is reached.
+Enforcement counts each observed call, including calls in quick succession;
+nudge retains its existing same-turn grouping and idle reset.
+`context.read_allow_globs` exempts explicit matching read paths, and subagents
+are exempt. Edit counting uses paths visible to PreToolUse, so a failed or
+cancelled edit can still count; shell writes and edits without file paths cannot
+be counted. Shell read detection uses the existing command heuristic.
+
+Hints use the small `context.prompt_roles` keyword table; first match wins, with
+docs and tests before general verbs. No match produces no hint. Hint logs contain
+only prompt size and chosen role, never prompt text.
+Delegation can reduce the main session's token use, but starting agents and
+returning results also costs tokens.
+
+The mode is stored in a file named `auto` beside the shared OFF switch in the
+state directory (or beside `ROUTER_OFF_FILE` when overridden), leaving installed
+package files unchanged. `router status` includes the mode. `router off` or
+`ROUTER_OFF=1` still disables everything; `router on` preserves the auto setting.
 
 ## What each host enforces
 
@@ -177,11 +272,13 @@ session changes, as on Claude. Use distinct names for genuinely different tasks.
 | Incompatible execution tier | Rewrites the role/model to the required tier | Denies with the role to retry when the ladder is enforced, because a pinned model cannot be rewritten |
 | Explicit up code | Reads `route: up <code>` from the prompt | Cannot read encrypted route text; only an execution upper role with an enforced ladder supplies the ladder request |
 | Nested spawns | Guarded | Guarded |
+| Automatic suggest | UserPromptSubmit adds one keyword-based role hint in `suggest` mode | Same; UserPromptSubmit exposes the prompt even though spawn messages are encrypted |
+| Automatic enforce | Main-session Read/Grep/Glob/Bash/Edit/Write thresholds; explicit allowed paths and subagents exempt | Observed shell calls use Bash. Codex edit counting is unverified: the spike identified Write/Edit-style patches but did not confirm the assumed Edit payload with `file_path`. Only visible file paths count; shell-written files and tools without these events are not observable |
 | Kill switch | Shared OFF file or `ROUTER_OFF=1` | The same file and environment flag |
 | Brief risk words and FILES globs | Available; risk mode defaults to shadow | Unavailable because `message` is encrypted |
 | Four-field brief lint | Skill and agent instructions; not spawn-hook enforced | Role `developer_instructions` and dispatch skill; not hook-enforced |
 | Fresh judge context | Resume removed by spawn hook | Requested by role and skill instructions (`fork_turns="none"`); not hook-enforced |
-| Return size and reading/context rules | Context hook, according to rule modes | Role instructions only; no Codex context hook installed |
+| Return size and reading/context rules | Context hook, according to rule modes | The PreToolUse context-note hook is installed, but whether Codex shows its `additionalContext` to the model is unverified. Observable read/edit thresholds are installed, with edit counting unverified as above; return caps remain role instructions only |
 
 A lane is one task's worktree run. `close-lane.sh` checks its brief for exactly one nonempty TASK, FILES, BAR, and
 RETURN on either host. It accepts free-text notes after those fields. The dispatch
@@ -229,6 +326,11 @@ Edit a copy of [routes.json](hooks/router/routes.json), then set `ROUTES_JSON` t
 
 Run `router status` to load and validate the selected table and show its modes. Run the repository tests after changing routing policy or agent definitions. The default risk rule is in shadow mode; the execution ladder is enforced.
 
+Generate tier Markdown and Codex TOMLs with `python3 scripts/generate_roles.py`;
+use `--check` to detect drift. Tier bodies come directly from the shared base role.
+`tiers` selects Claude model and effort; `codex_models` maps those models to Codex
+model and effort pins. `agents/SHARED.sha256` verifies the nine shared sources.
+
 ## Helpers
 
 The installer places these alongside `router` in `router/bin`:
@@ -250,7 +352,7 @@ Use `CLOSE_LANE_BASE` to choose the Git base for committed changes; the default 
 The optional logger writes `$ROUTER_STATE/runs.jsonl` with the same state default as the hooks. For example:
 
 ```bash
-dispatch-log.py add --family parser-empty --seat seat-exec --model sonnet --verdict PASS
+dispatch-log.py add --family parser-empty --seat builder --model sonnet --verdict PASS
 dispatch-log.py rounds parser-empty
 ```
 
@@ -265,5 +367,6 @@ timeout 900 bash -c 'for t in tests/test_*.py; do python3 "$t" || exit 1; done &
 ```
 
 Both fresh-user tests install into temporary homes and exercise the installed hooks and shared kill switch. The Codex test sets temporary HOME and CODEX_HOME; it never starts Codex or calls a model. The package includes a Gitleaks configuration that extends its default secret rules.
+To check installation alongside Harness in both orders, run `HARNESS_DIR=/path/to/harness bash tests/together.sh`.
 
 Released under the [MIT license](LICENSE). Copyright (c) 2026 AEIA.

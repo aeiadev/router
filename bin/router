@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The single switch for all routing hooks: router on|off|status."""
+"""Routing switches: router on|off|status; router auto [off|suggest|nudge|enforce]."""
 import argparse
 import os
 import sys
@@ -17,8 +17,20 @@ import common
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("on", "off", "status"))
+    parser.add_argument("command", choices=("on", "off", "status", "auto"))
+    parser.add_argument("mode", nargs="?", choices=common.AUTO_MODES)
     args = parser.parse_args()
+    if args.command == "auto":
+        if args.mode is not None:
+            skipped = common.refresh_defaults(args.mode)
+            common.set_auto_mode(args.mode)
+            if skipped:
+                print(f"Defaults were not updated in {', '.join(map(str, skipped))}; "
+                      "reinstall with install.sh --with-defaults (select the same --host).")
+        print(common.auto_mode())
+        return 0
+    if args.mode is not None:
+        parser.error("a mode is only accepted with router auto")
     switch = common.off_file()
     if args.command == "off":
         switch.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -30,6 +42,7 @@ def main():
     if os.environ.get("ROUTER_OFF") == "1":
         print("ROUTER_OFF=1 is set; unset it to enable routing.")
     if args.command == "status":
+        print(f"auto: {common.auto_mode()}")
         routes = common.load_routes()
         for section in ("router", "context"):
             for rule, mode in sorted(routes[section]["modes"].items()):

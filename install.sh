@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import sys
@@ -27,11 +28,16 @@ if sys.version_info < (3, 10):
     sys.exit("router install: missing requirement: python3 3.10 or newer")
 
 source = Path(sys.argv[1])
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(source / "hooks/router"))
+import common
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--host", choices=("claude", "codex", "both"),
                     help="install for selected hosts (default: hosts present, or Claude for a fresh HOME)")
 parser.add_argument("--dry-run", action="store_true", help="show changes without writing files")
 parser.add_argument("--uninstall", action="store_true", help="remove unchanged installed files and added hooks")
+parser.add_argument("--with-defaults", action="store_true", help="manage delegation defaults in host instructions")
 args = parser.parse_args(sys.argv[2:])
 homes = {name: Path(os.environ.get(name.upper() + "_HOME") or Path.home() / ("." + name)).expanduser().absolute()
          for name in ("claude", "codex")}
@@ -66,6 +72,41 @@ def fingerprint(path):
     if path.is_file():
         return {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     return None
+
+
+SHARED_ROLES = frozenset(
+    f"agents/{name}{extension}"
+    for name in ("sweeper", "researcher", "planner", "builder", "builder-in-place",
+                 "judge", "worker", "test-writer", "docs-writer")
+    for extension in (".md", ".toml")
+)
+
+
+def harness_manifest():
+    """Return a valid Harness manifest, or None when it is unsafe to trust."""
+    sibling = home / "harness" / "install-manifest.json"
+    if not sibling.exists() and not sibling.is_symlink():
+        return {}
+    try:
+        if sibling.is_symlink() or not sibling.is_file():
+            return None
+        value = json.loads(sibling.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("files"), dict) or not isinstance(value.get("hooks"), dict):
+            return None
+        for relative, digest in value["files"].items():
+            if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                return None
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                return None
+        return value
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+
+
+def harness_shared_files():
+    """Return Harness claims, or None when its manifest is unsafe to trust."""
+    sibling = harness_manifest()
+    return None if sibling is None else set(sibling.get("files", {}))
 
 
 def check_path(relative):
@@ -119,14 +160,20 @@ def run():
     manifest = load_json(manifest_path, {"version": 1, "files": {}, "hooks": []})
     if manifest.get("version") != 1 or not isinstance(manifest.get("files"), dict) or not isinstance(manifest.get("hooks"), list):
         fail("invalid router install manifest")
+    defaults = defaults_plans.get(host)
 
     if args.uninstall:
         if not manifest_path.exists():
             print("Router is not installed by this installer; nothing to remove.")
             return
         removable = []
+        harness_files = harness_shared_files() if any(name in SHARED_ROLES for name in manifest["files"]) else set()
         for relative, recorded in manifest["files"].items():
             target = check_path(relative)
+            if relative in SHARED_ROLES and (harness_files is None or relative in harness_files):
+                reason = "invalid Harness manifest" if harness_files is None else "Harness still uses it"
+                print(f"Keeping shared role file: {relative} ({reason}).")
+                continue
             if fingerprint(target) == recorded:
                 removable.append(target)
             elif target.exists() or target.is_symlink():
@@ -139,11 +186,17 @@ def run():
                 fail(f"{settings.name} hooks.{event} must be an array")
             if block in blocks:
                 blocks.remove(block)
-                if not blocks:
+                if not blocks and event not in manifest.get("existing_empty_events", []):
                     hooks.pop(event, None)
+        if not hooks and not manifest.get("had_hooks", True):
+            config.pop("hooks", None)
         if args.dry_run:
             print(f"Would uninstall {len(removable)} unchanged files and remove added hooks from {settings}")
+            if defaults is not None:
+                print(f"Would remove delegation defaults from {defaults['path']}")
             return
+        if defaults is not None:
+            common.apply_defaults(defaults)
         save_settings(config, original)
         for target in removable:
             target.unlink()
@@ -168,11 +221,14 @@ def run():
     files = {}
     for directory, destination in (("hooks/router", "hooks/router"),
                                    ("agents" if host == "claude" else "codex/agents", "agents"),
-                                   ("skills/dispatch", "skills/dispatch"), ("scripts", "router/bin")):
+                                   ("skills/dispatch", "skills/dispatch"), ("scripts", "router/bin"),
+                                   ("templates", "router/templates")):
         folder = source / directory
         if not folder.is_dir():
             fail(f"missing package directory: {directory}")
         for path in sorted(folder.rglob("*")):
+            if path.name == "SHARED.sha256":
+                continue  # Repository drift check, not an installable agent.
             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
                 files[str(Path(destination) / path.relative_to(folder))] = path
     files["router/bin/router"] = source / "bin/router"
@@ -194,7 +250,7 @@ def run():
         if current != wanted:
             writes.append((target, payload))
             planned[relative] = wanted
-        elif relative in manifest["files"]:
+        elif relative in manifest["files"] or relative in SHARED_ROLES:
             planned[relative] = wanted
 
     template = "examples/settings.example.json" if host == "claude" else "codex/hooks.json"
@@ -203,16 +259,27 @@ def run():
         for blocks in additions.values():
             for block in blocks:
                 for hook in block["hooks"]:
+                    script = re.search(r"/([a-z_]+\.py)", hook["command"])[1]
                     if host == "codex":
-                        script = "codex_spawn_guard.py"
                         environment = (f"CODEX_HOME={shlex.quote(str(home))} "
                                        f"ROUTER_HOME={shlex.quote(str(home / 'router'))}")
                     else:
-                        script = "spawn_guard.py" if "spawn_guard.py" in hook["command"] else "context_guard.py"
                         environment = f"CLAUDE_HOME={shlex.quote(str(home))}"
                     hook["command"] = f"{environment} python3 {shlex.quote(str(home / 'hooks/router' / script))}"
     hooks = config.setdefault("hooks", {})
-    recorded_hooks = list(manifest["hooks"])
+    # Replace exact, installer-owned old registrations when the matcher changes.
+    # Leaving both installed would count every read twice after an upgrade.
+    recorded_hooks = []
+    for entry in manifest["hooks"]:
+        event, block = entry["event"], entry["block"]
+        if event in additions and block not in additions[event]:
+            existing = hooks.get(event, [])
+            if not isinstance(existing, list):
+                fail(f"{settings.name} hooks.{event} must be an array")
+            if block in existing:
+                existing.remove(block)
+        else:
+            recorded_hooks.append(entry)
     for event, blocks in additions.items():
         existing = hooks.setdefault(event, [])
         if not isinstance(existing, list):
@@ -223,6 +290,8 @@ def run():
                 recorded_hooks.append({"event": event, "block": block})
     if args.dry_run:
         print(f"Would install {len(writes)} files under {home} and merge router hooks into {settings}")
+        if defaults is not None:
+            print(f"Would insert or replace delegation defaults in {defaults['path']}")
         return
     for target, payload in writes:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -235,7 +304,20 @@ def run():
         else:
             target.symlink_to(payload)
     save_settings(config, original)
-    result = {"version": 1, "files": planned, "hooks": recorded_hooks}
+    sibling = harness_manifest() if not manifest_path.exists() else None
+    had_hooks = ("hooks" in original and not (sibling is not None and sibling.get("had_hooks") is False))
+    result = {"version": 1, "files": planned, "hooks": recorded_hooks,
+              "had_hooks": manifest.get("had_hooks", had_hooks if not manifest_path.exists() else True),
+              "existing_empty_events": manifest.get("existing_empty_events",
+                                                     [event for event, blocks in original.get("hooks", {}).items()
+                                                      if blocks == []])}
+    if defaults is not None:
+        common.apply_defaults(defaults)
+        if defaults["backup"] is not None:
+            print(f"Backed up defaults: {defaults['backup']}")
+        result["defaults"] = dict(defaults["record"], host=host)
+    elif "defaults" in manifest:
+        result["defaults"] = manifest["defaults"]
     if result != manifest or not manifest_path.exists():
         write_json(manifest_path, result)
     print(f"Router installed for {host} in {home}")
@@ -250,6 +332,18 @@ def run():
 try:
     if len(selected) > 1 and homes["claude"] == homes["codex"]:
         fail("CLAUDE_HOME and CODEX_HOME must differ when installing both hosts")
+    # Reject marker errors for every selected host before changing any files.
+    defaults_plans = {}
+    if args.with_defaults or args.uninstall:
+        for host in selected:
+            home = homes[host]
+            manifest = common.defaults_manifest(home)
+            record = manifest.get("defaults")
+            if args.uninstall and record is None:
+                continue
+            block = (None if args.uninstall else
+                     common.render_defaults(host, common.load_routes(), common.auto_mode()))
+            defaults_plans[host] = common.plan_defaults(home, host, record, block)
     for host in selected:
         home = homes[host]
         settings = home / ("settings.json" if host == "claude" else "hooks.json")

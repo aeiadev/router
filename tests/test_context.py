@@ -105,7 +105,7 @@ def bash_ev(env, cmd="cat a"):
     return pre_ev(env, "Bash", {"command": cmd})
 
 
-def handback_ev(env, text, agent_id="agA", agent_type="seat-exec-here-std"):
+def handback_ev(env, text, agent_id="agA", agent_type="builder-in-place-std"):
     extra = {"agent_id": agent_id}
     if agent_type is not None:
         extra["agent_type"] = agent_type
@@ -136,14 +136,14 @@ def drive(env, calls, step=2000, start=T0, cmd="cat a"):
 
 def case_01_start_note():
     env = Env()
-    proc = env.run(start_ev(env, "seat-exec-here-std"))
+    proc = env.run(start_ev(env, "builder-in-place-std"))
     check(proc.returncode == 0, "exit")
     out = json.loads(proc.stdout)["hookSpecificOutput"]
     check(out["hookEventName"] == "SubagentStart", "event name")
     check("1500" in out["additionalContext"], "exec cap in text")
     check(str(env.state / "reports") in out["additionalContext"] and "~" not in out["additionalContext"],
           "reports dir expanded")
-    proc = env.run(start_ev(env, "Explore"))
+    proc = env.run(start_ev(env, "researcher"))
     text = ctx(proc)
     check("5000" in text and "reports" not in text, "research text has cap and no reports dir")
     for agent_type in ("totally-unknown", ""):
@@ -155,10 +155,10 @@ def case_01_start_note():
 
 def case_02_start_note_off_and_shadow():
     env = Env(set_modes(start_note="off"))
-    proc = env.run(start_ev(env, "seat-exec-here-std"))
+    proc = env.run(start_ev(env, "builder-in-place-std"))
     check(proc.returncode == 0 and proc.stdout == "", "off: no output")
     env = Env(set_modes(start_note="shadow", stop_cap_seats="shadow"))
-    proc = env.run(start_ev(env, "seat-exec-here-std"))
+    proc = env.run(start_ev(env, "builder-in-place-std"))
     check(proc.returncode == 0 and proc.stdout == "", "shadow: no output")
     rec = env.log()[-1]
     check(rec["event"] == "start_note" and rec["enforced"] is False and rec["session"] == SID[:8], f"log {rec}")
@@ -166,7 +166,7 @@ def case_02_start_note_off_and_shadow():
 
 def case_03_stop_under_cap():
     env = Env()
-    proc = env.run(stop_ev(env, "seat-exec-here", "x" * 1500))
+    proc = env.run(stop_ev(env, "builder-in-place", "x" * 1500))
     check(proc.returncode == 0 and proc.stdout == "", "no output under cap")
     rec = env.log()[-1]
     check(rec["event"] == "stop_cap" and rec["action"] == "ok" and rec["chars"] == 1500, f"log {rec}")
@@ -174,7 +174,7 @@ def case_03_stop_under_cap():
 
 def case_04_stop_over_cap_blocks():
     env = Env()
-    proc = env.run(stop_ev(env, "seat-exec-here", "x" * 2200))
+    proc = env.run(stop_ev(env, "builder-in-place", "x" * 2200))
     check(proc.returncode == 0, "exit 0 with block JSON")
     out = json.loads(proc.stdout)
     check(out["decision"] == "block", "decision block")
@@ -186,25 +186,25 @@ def case_04_stop_over_cap_blocks():
 
 def case_05_stop_hook_active():
     env = Env()
-    proc = env.run(stop_ev(env, "seat-exec-here", "x" * 2200, active=True))
+    proc = env.run(stop_ev(env, "builder-in-place", "x" * 2200, active=True))
     check(proc.returncode == 0 and proc.stdout == "", "no output when stop_hook_active")
     check(env.log()[-1]["action"] == "second_pass", "second_pass")
 
 
 def case_06_research_shadow_then_enforce():
     env = Env()
-    proc = env.run(stop_ev(env, "Explore", "x" * 6000))
+    proc = env.run(stop_ev(env, "researcher", "x" * 6000))
     check(proc.returncode == 0 and proc.stdout == "", "shadow: no output")
     check(env.log()[-1]["action"] == "shadow", "shadow logged")
     env = Env(set_modes(stop_cap_research="enforce"))
-    proc = env.run(stop_ev(env, "Explore", "x" * 6000))
+    proc = env.run(stop_ev(env, "researcher", "x" * 6000))
     out = json.loads(proc.stdout)
     check(out["decision"] == "block" and "path:line" in out["reason"], "research enforce blocks")
 
 
 def case_07_stop_shadow():
     env = Env(set_modes(start_note="shadow", stop_cap_seats="shadow"))
-    proc = env.run(stop_ev(env, "seat-exec-here", "x" * 2200))
+    proc = env.run(stop_ev(env, "builder-in-place", "x" * 2200))
     check(proc.returncode == 0 and proc.stdout == "", "shadow: no output")
     rec = env.log()[-1]
     check(rec["enforced"] is False and rec["action"] == "shadow", f"log {rec}")
@@ -214,17 +214,17 @@ def case_08_class_caps():
     def mod(routes):
         routes["context"]["caps"].update({"judge": 1200, "worker": 4000})
     env = Env(mod)
-    proc = env.run(stop_ev(env, "seat-judge-up", "x" * 1300))
+    proc = env.run(stop_ev(env, "judge-up", "x" * 1300))
     check(json.loads(proc.stdout)["decision"] == "block", "judge over its own cap blocks")
     check("1200" in json.loads(proc.stdout)["reason"], "judge cap in reason")
-    proc = env.run(stop_ev(env, "seat-exec-here", "x" * 1300))
+    proc = env.run(stop_ev(env, "builder-in-place", "x" * 1300))
     check(proc.stdout == "", "exec cap 1500 not exceeded by 1300")
     env2 = Env(lambda r: (mod(r), set_modes(stop_cap_research="enforce")(r)))
-    proc = env2.run(stop_ev(env2, "general-purpose", "x" * 4100))
+    proc = env2.run(stop_ev(env2, "worker", "x" * 4100))
     out = json.loads(proc.stdout)
     check("4000" in out["reason"], "worker cap in reason")
     check(env2.log()[-1]["class"] == "worker", "worker class")
-    proc = env2.run(stop_ev(env2, "general-purpose", "x" * 3900))
+    proc = env2.run(stop_ev(env2, "worker", "x" * 3900))
     check(proc.stdout == "", "worker under cap")
 
 
@@ -232,7 +232,7 @@ def case_08_class_caps():
 
 def case_09_subagent_pretool_ignored():
     env = Env()
-    proc = env.run(pre_ev(env, "Bash", {"command": "cat a"}, agent_id="agX", agent_type="Explore"), now_ms=T0)
+    proc = env.run(pre_ev(env, "Bash", {"command": "cat a"}, agent_id="agX", agent_type="researcher"), now_ms=T0)
     check(proc.returncode == 0 and proc.stdout == "", "no output")
     check(not (env.state / "chain").exists(), "no chain dir")
     check(not env.all_logs(), "no log")
@@ -245,7 +245,7 @@ def case_10_chain_notes():
         check(proc.returncode == 0, f"call {index} exit")
         if index in (5, 10, 20):
             text = ctx(proc)
-            check(f"{index} consecutive" in text and "seat-sweep" in text, f"note at {index}")
+            check(f"{index} consecutive" in text and "sweeper" in text, f"note at {index}")
         else:
             check(proc.stdout == "", f"no note at {index}")
     notes = [r for r in env.log() if r["event"] == "chain_note"]
@@ -366,7 +366,7 @@ def case_18_kill_switch():
     env.off.write_text("")
     big = env.tmp / "big.txt"
     big.write_bytes(b"a" * 30_000)
-    events = [start_ev(env, "seat-exec-here-std"), stop_ev(env, "seat-exec-here", "x" * 2200),
+    events = [start_ev(env, "builder-in-place-std"), stop_ev(env, "builder-in-place", "x" * 2200),
               handback_ev(env, "x" * 4000), bash_ev(env), pre_ev(env, "Read", {"file_path": str(big)})]
     for ev in events:
         proc = env.run(ev, now_ms=T0)
@@ -385,7 +385,7 @@ def case_19_errors_allow():
     proc = env.run(pre_ev(env, "Write", {"file_path": "x"}), now_ms=T0)
     check(proc.returncode == 0 and proc.stdout == "", "other tool")
     env.routes_path.write_text("{ broken")
-    proc = env.run(start_ev(env, "seat-exec-here-std"))
+    proc = env.run(start_ev(env, "builder-in-place-std"))
     check(proc.returncode == 0 and proc.stdout == "", "malformed routes exits 0")
     errors = env.log("errors")
     check(len(errors) == 1 and errors[0]["script"] == "context_guard", f"errors log {errors}")
@@ -396,8 +396,8 @@ def case_20_privacy():
     env = Env(set_modes(large_read="enforce"))
     big = env.tmp / f"{marker}.txt"
     big.write_bytes(b"a" * 30_000)
-    env.run(stop_ev(env, "seat-exec-here", marker + "x" * 2200))
-    env.run(stop_ev(env, "Explore", marker + "x" * 6000))
+    env.run(stop_ev(env, "builder-in-place", marker + "x" * 2200))
+    env.run(stop_ev(env, "researcher", marker + "x" * 6000))
     for index in range(1, 6):  # five spaced calls so the chain note record is written
         env.run(pre_ev(env, "Bash", {"command": f"cat {marker}"}), now_ms=T0 + index * 2000)
     env.run(pre_ev(env, "Read", {"file_path": str(big)}), now_ms=T0 + 5000)
@@ -439,7 +439,7 @@ def case_23_handback_meta_lookup():
     env = Env()
     meta = env.transcript.parent / SID / "subagents" / "agent-agM.meta.json"
     meta.parent.mkdir(parents=True)
-    meta.write_text(json.dumps({"agentType": "seat-exec-here-std"}))
+    meta.write_text(json.dumps({"agentType": "builder-in-place-std"}))
     proc = env.run(handback_ev(env, "x" * 4000, agent_id="agM", agent_type=None))
     check(proc.returncode == 2 and "1500" in proc.stderr, f"type read from meta ({proc.returncode})")
     proc = env.run(handback_ev(env, "x" * 4000, agent_id="agNone", agent_type=None))
@@ -449,7 +449,7 @@ def case_23_handback_meta_lookup():
 
 def case_24_handback_research_and_shadow():
     env = Env()
-    proc = env.run(handback_ev(env, "x" * 6000, agent_type="Explore"))
+    proc = env.run(handback_ev(env, "x" * 6000, agent_type="researcher"))
     check(proc.returncode == 0 and env.log()[-1]["action"] == "shadow", "research shadow")
     check(not (env.state / "handback").exists() or not list((env.state / "handback").iterdir()),
           "shadow leaves no counter file")
@@ -513,7 +513,7 @@ def case_28_concurrent_chain_updates():
 def case_29_handback_edge_cases():
     env = Env()
     for _ in range(3):  # no usable agent id: cannot count, so never block
-        proc = env.run(pre_ev(env, "SubagentHandback", {"message": "x" * 4000}, agent_type="seat-exec-here-std"))
+        proc = env.run(pre_ev(env, "SubagentHandback", {"message": "x" * 4000}, agent_type="builder-in-place-std"))
         check(proc.returncode == 0, "no agent_id: allowed")
     check(env.log()[-1]["action"] == "unlisted", f"log {env.log()[-1]}")
     env = Env(set_modes(start_note="shadow", stop_cap_seats="shadow"))  # counter present wins over mode: second_pass in any mode
@@ -580,7 +580,7 @@ def case_32_kill_switch_before_input_and_state():
 
 def case_33_read_only_return_contracts():
     env = Env()
-    for agent_type, cap in (("seat-sweep", 3000), ("seat-judge", 1500)):
+    for agent_type, cap in (("sweeper", 3000), ("judge", 1500)):
         proc = env.run(start_ev(env, agent_type))
         text = ctx(proc)
         check("read-only" in text and "never writes a file" in text, f"{agent_type} read-only note")
@@ -593,18 +593,18 @@ def case_33_read_only_return_contracts():
 def case_34_no_transcript_required():
     env = Env()
     env.transcript.unlink()
-    proc = env.run(start_ev(env, "seat-exec"))
+    proc = env.run(start_ev(env, "builder"))
     check("1500" in ctx(proc), "configured enforcement requires no transcript")
-    proc = env.run(stop_ev(env, "seat-exec", "x" * 1501))
+    proc = env.run(stop_ev(env, "builder", "x" * 1501))
     check(json.loads(proc.stdout)["decision"] == "block", "cap enforced with no transcript")
 
 
 def case_35_reports_override_and_bad_message():
     custom = "~/custom-reports"
     env = Env(lambda r: r["context"].update({"reports_dir": custom}))
-    proc = env.run(start_ev(env, "seat-exec"))
+    proc = env.run(start_ev(env, "builder"))
     check(str(env.tmp / "home" / "custom-reports") in ctx(proc), "reports override expands HOME")
-    proc = env.run(stop_ev(env, "seat-exec", ["not a string"] * 2000))
+    proc = env.run(stop_ev(env, "builder", ["not a string"] * 2000))
     check(proc.returncode == 0 and proc.stdout == "", "wrong message type fails open")
 
 
@@ -620,7 +620,7 @@ def case_36_clock_override():
 
 def case_37_malformed_agent_types_allow():
     env = Env()
-    for agent_type in (["seat-exec"], {"type": "seat-exec"}, 7, True):
+    for agent_type in (["builder"], {"type": "builder"}, 7, True):
         for ev in (start_ev(env, agent_type), stop_ev(env, agent_type, "x" * 6000)):
             proc = env.run(ev)
             check(proc.returncode == 0 and proc.stdout == "", f"invalid agent type {agent_type!r}")
@@ -628,7 +628,7 @@ def case_37_malformed_agent_types_allow():
 
 def case_38_reports_do_not_expand_write_scope():
     env = Env(set_modes(stop_cap_research="enforce"))
-    for agent_type, cap in (("seat-exec", 1500), ("general-purpose", 5000)):
+    for agent_type, cap in (("builder", 1500), ("worker", 5000)):
         proc = env.run(start_ev(env, agent_type))
         check("when the task allows writing there" in ctx(proc), f"{agent_type}: start respects write scope")
         proc = env.run(stop_ev(env, agent_type, "x" * (cap + 1)))

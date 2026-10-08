@@ -30,7 +30,7 @@ def main() -> int:
     result = common.record_spawn(brief, classified if brief else None,
                                  lambda prior: common.decide_codex_spawn(ti, routes, modes, prior))
     common.log("spawns", {key: result[key] for key in
-                         ("decision", "rule", "run_type", "run_model", "class", "tier", "brief", "round", "notes", "shadow")})
+                         ("decision", "rule", "asked_type", "run_type", "run_model", "class", "tier", "brief", "round", "notes", "shadow")})
     if result["decision"] == "block":
         sys.stderr.write(result["message"] + "\n")
         return 2

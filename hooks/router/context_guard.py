@@ -7,6 +7,7 @@ the main loop reads by itself. Separate from spawn_guard.py: own modes under
 routes["context"]["modes"]. Any error allows (exit 0); only a deliberate
 block exits 2. Logs carry sizes, counts and type names, never text or paths.
 """
+import hashlib
 import fcntl
 import fnmatch
 import json
@@ -27,6 +28,7 @@ READ_ONLY_KEEP = {"judge": "keep the VERDICT line and the numbered FINDINGS in t
                   "sweep": "keep the conclusion and the counts, and drop the rest"}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf")
 CHAIN_TOOLS = ("Bash", "Read", "Grep", "Glob")
+AUTO_TOOLS = CHAIN_TOOLS + ("Edit", "Write")
 
 
 def now_ms() -> int:
@@ -292,24 +294,88 @@ def update_chain(data, routes, tool_name, tool_input):
     return None
 
 
+def allowed_read(data, routes, tool_name, tool_input):
+    if tool_name not in common.READ_TOOLS:
+        return False
+    path = tool_input.get("file_path") if tool_name == "Read" else tool_input.get("path")
+    if not isinstance(path, str) or not path:
+        return False
+    absolute = os.path.abspath(os.path.join(data.get("cwd") or os.getcwd(), os.path.expanduser(path)))
+    return any(fnmatch.fnmatch(absolute, glob)
+               for glob in ctx_section(routes).get("read_allow_globs", []))
+
+
+def auto_block(data, routes, tool_name, tool_input):
+    """Count observable calls under a lock; reject the call after a threshold.
+
+    Unlike the nudge's timed single-call heuristic, enforcement counts every
+    consecutive read. State stores file identity hashes, never paths or content.
+    PreToolUse sees attempted edits, not their eventual success.
+    """
+    name = safe_name(data.get("session_id"))
+    if not name or allowed_read(data, routes, tool_name, tool_input):
+        return None
+    folder = common.state_dir() / "auto-chain"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = folder / f"{name}.json"
+    with open(folder / f"{name}.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            count, files = state["count"], state["files"]
+            if not is_int(count) or count < 0 or not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+                raise ValueError("invalid auto state")
+        except (OSError, ValueError, KeyError, TypeError):
+            state, count, files = {}, 0, []
+        spawned = common.last_spawn(data.get("session_id"))
+        if spawned != state.get("spawned"):
+            count, files = 0, []  # A new spawn resets both automatic counters.
+        role = "builder" if len(files) > ctx_section(routes).get("files_threshold", 3) else None
+        if role is None and count >= ctx_section(routes)["chain"]["first"]:
+            role = "sweeper"
+        if role is not None:
+            return role
+        count = count + 1 if common.read_like(tool_name, tool_input) else 0
+        file_path = tool_input.get("file_path")
+        if tool_name in ("Edit", "Write") and isinstance(file_path, str) and file_path:
+            absolute = os.path.abspath(os.path.join(data.get("cwd") or os.getcwd(), os.path.expanduser(file_path)))
+            digest = hashlib.sha256(os.fsencode(absolute)).hexdigest()
+            if digest not in files:
+                files.append(digest)
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps({"count": count, "files": files, "spawned": spawned}), encoding="utf-8")
+        os.replace(temporary, path)
+    return None
+
+
 def on_pretool(data, routes):
     tool_name = data.get("tool_name")
     if tool_name == "SubagentHandback":
         return on_handback(data, routes)
-    if tool_name not in CHAIN_TOOLS or not common.is_main(data):
+    if tool_name not in AUTO_TOOLS or not common.is_main(data):
         return
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         tool_input = {}
+    auto = common.auto_mode()
+    if auto == "enforce":
+        role = auto_block(data, routes, tool_name, tool_input)
+        if role is not None:
+            common.log("context", {"event": "auto_block", "role": role, "action": "block"})
+            sys.stderr.write(f"Router automatic routing threshold reached: spawn {role} before more reads or edits. "
+                             "To relax this guard, run `router auto nudge`.\n")
+            sys.exit(2)
+    if tool_name not in CHAIN_TOOLS:
+        return
     big = large_read(data, routes, tool_input) if tool_name == "Read" else None
-    count = update_chain(data, routes, tool_name, tool_input)
+    count = update_chain(data, routes, tool_name, tool_input) if auto != "off" else None
     if big is not None:
         common.log("context", big)
     if big is not None and big["enforced"]:
         size_kb = max(1, os.stat(tool_input["file_path"]).st_size // 1000)
         sys.stderr.write(f"Blocked by the delegation guard: this file is {size_kb} KB and the Read has no "
                          f"limit. Search first (rg), then Read with offset and limit, or send a "
-                         f"seat-sweep.\n")
+                         f"sweeper.\n")
         sys.exit(2)
     if count is None:
         return
@@ -322,7 +388,7 @@ def on_pretool(data, routes):
     if mode == "enforce":
         text = (f"Context note (delegation guard): {count} consecutive single read-type tool calls in the "
                 f"main loop with no spawn in between. Delegate a multi-step investigation to "
-                f"seat-sweep or an explore agent to keep detailed results out of the main context.")
+                f"sweeper or an explore agent to keep detailed results out of the main context.")
         common.emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}})
 
 

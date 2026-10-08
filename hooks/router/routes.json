@@ -1,99 +1,99 @@
 {
   "version": 1,
   "tiers": {
-    "seat-exec-here": {
+    "builder-in-place": {
       "light": {
-        "agent": "seat-exec-here-light",
+        "agent": "builder-in-place-light",
         "model": "sonnet",
         "effort": "medium"
       },
       "std": {
-        "agent": "seat-exec-here-std",
+        "agent": "builder-in-place-std",
         "model": "sonnet",
         "effort": "medium"
       },
       "up": {
-        "agent": "seat-exec-here-up",
+        "agent": "builder-in-place-up",
         "model": "opus",
         "effort": "xhigh"
       }
     },
-    "seat-exec": {
+    "builder": {
       "light": {
-        "agent": "seat-exec-light",
+        "agent": "builder-light",
         "model": "sonnet",
         "effort": "medium"
       },
       "std": {
-        "agent": "seat-exec-std",
+        "agent": "builder-std",
         "model": "sonnet",
         "effort": "medium"
       },
       "up": {
-        "agent": "seat-exec-up",
+        "agent": "builder-up",
         "model": "opus",
         "effort": "xhigh"
       }
     },
-    "seat-judge": {
+    "judge": {
       "std": {
-        "agent": "seat-judge-std",
+        "agent": "judge-std",
         "model": "opus",
         "effort": "high"
       },
       "up": {
-        "agent": "seat-judge-up",
+        "agent": "judge-up",
         "model": "opus",
         "effort": "xhigh"
       },
       "light": {
-        "agent": "seat-judge-light",
+        "agent": "judge-light",
         "model": "opus",
         "effort": "high"
       }
     },
-    "seat-sweep": {
+    "sweeper": {
       "light": {
-        "agent": "seat-sweep-light",
+        "agent": "sweeper-light",
         "model": "haiku",
         "effort": "none"
       },
       "std": {
-        "agent": "seat-sweep-std",
+        "agent": "sweeper-std",
         "model": "sonnet",
         "effort": "medium"
       },
       "up": {
-        "agent": "seat-sweep-up",
+        "agent": "sweeper-up",
         "model": "opus",
         "effort": "high"
       }
     },
-    "Explore": {
+    "researcher": {
       "std": {
-        "agent": "explore-std",
+        "agent": "researcher-std",
         "model": "sonnet",
         "effort": "medium"
       },
       "up": {
-        "agent": "explore-up",
+        "agent": "researcher-up",
         "model": "opus",
         "effort": "high"
       }
     },
-    "Plan": {
+    "planner": {
       "std": {
-        "agent": "plan-std",
+        "agent": "planner-std",
         "model": "sonnet",
         "effort": "high"
       },
       "up": {
-        "agent": "plan-up",
+        "agent": "planner-up",
         "model": "opus",
         "effort": "xhigh"
       }
     },
-    "general-purpose": {
+    "worker": {
       "std": {
         "agent": "worker-std",
         "model": "sonnet",
@@ -107,16 +107,32 @@
     }
   },
   "tier_sources": {
-    "Explore": {
-      "source": "agents/Explore.md",
-      "prefix": "explore-"
+    "builder-in-place": {
+      "source": "agents/builder-in-place.md",
+      "prefix": "builder-in-place-"
     },
-    "Plan": {
-      "source": "agents/Plan.md",
-      "prefix": "plan-"
+    "builder": {
+      "source": "agents/builder.md",
+      "prefix": "builder-"
     },
-    "general-purpose": {
-      "source": "agents/general-purpose.md",
+    "judge": {
+      "source": "agents/judge.md",
+      "prefix": "judge-"
+    },
+    "sweeper": {
+      "source": "agents/sweeper.md",
+      "prefix": "sweeper-"
+    },
+    "researcher": {
+      "source": "agents/researcher.md",
+      "prefix": "researcher-"
+    },
+    "planner": {
+      "source": "agents/planner.md",
+      "prefix": "planner-"
+    },
+    "worker": {
+      "source": "agents/worker.md",
       "prefix": "worker-"
     }
   },
@@ -131,7 +147,7 @@
       "inject_unlisted": "enforce"
     },
     "types": {
-      "seat-sweep": {
+      "sweeper": {
         "class": "sweep",
         "allow": [
           "haiku",
@@ -142,7 +158,7 @@
         ],
         "tiered": true
       },
-      "seat-exec": {
+      "builder": {
         "class": "exec",
         "allow": [
           "sonnet"
@@ -152,7 +168,7 @@
         ],
         "tiered": true
       },
-      "seat-exec-here": {
+      "builder-in-place": {
         "class": "exec",
         "allow": [
           "sonnet"
@@ -162,14 +178,14 @@
         ],
         "tiered": true
       },
-      "seat-judge": {
+      "judge": {
         "class": "judge",
         "allow": [
           "opus"
         ],
         "tiered": true
       },
-      "general-purpose": {
+      "worker": {
         "class": "worker",
         "allow": [
           "sonnet",
@@ -180,7 +196,7 @@
         ],
         "tiered": true
       },
-      "Explore": {
+      "researcher": {
         "class": "research",
         "allow": [
           "sonnet",
@@ -192,7 +208,7 @@
         "tiered": true,
         "inject": "sonnet"
       },
-      "Plan": {
+      "planner": {
         "class": "research",
         "allow": [
           "sonnet",
@@ -202,6 +218,28 @@
           "opus"
         ],
         "tiered": true,
+        "inject": "sonnet"
+      },
+      "test-writer": {
+        "class": "exec",
+        "allow": [
+          "sonnet"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": false,
+        "inject": "sonnet"
+      },
+      "docs-writer": {
+        "class": "exec",
+        "allow": [
+          "sonnet"
+        ],
+        "up": [
+          "opus"
+        ],
+        "tiered": false,
         "inject": "sonnet"
       }
     },
@@ -271,6 +309,82 @@
     "large_read_bytes": 24000,
     "read_allow_globs": [
       "*/.claude/plans/*"
-    ]
+    ],
+    "files_threshold": 3,
+    "command_threshold": 2,
+    "prompt_roles": {
+      "docs-writer": [
+        "docs",
+        "readme"
+      ],
+      "test-writer": [
+        "test"
+      ],
+      "planner": [
+        "plan",
+        "design",
+        "approach"
+      ],
+      "researcher": [
+        "compare",
+        "evaluate",
+        "should we",
+        "why"
+      ],
+      "sweeper": [
+        "find",
+        "list",
+        "count",
+        "where"
+      ],
+      "builder": [
+        "fix",
+        "add",
+        "implement",
+        "change",
+        "refactor"
+      ]
+    }
+  },
+  "codex_models": {
+    "haiku": {
+      "model": "gpt-6-luna",
+      "effort": "low"
+    },
+    "sonnet": {
+      "model": "gpt-6-sol",
+      "effort": "medium"
+    },
+    "opus": {
+      "model": "gpt-6-astra",
+      "effort": "high"
+    }
+  },
+  "aliases": {
+    "seat-exec": "builder",
+    "seat-exec-here": "builder-in-place",
+    "seat-judge": "judge",
+    "seat-sweep": "sweeper",
+    "general-purpose": "worker",
+    "Explore": "researcher",
+    "Plan": "planner",
+    "seat-exec-light": "builder-light",
+    "seat-exec-std": "builder-std",
+    "seat-exec-up": "builder-up",
+    "seat-exec-here-light": "builder-in-place-light",
+    "seat-exec-here-std": "builder-in-place-std",
+    "seat-exec-here-up": "builder-in-place-up",
+    "seat-judge-light": "judge-light",
+    "seat-judge-std": "judge-std",
+    "seat-judge-up": "judge-up",
+    "seat-sweep-light": "sweeper-light",
+    "seat-sweep-std": "sweeper-std",
+    "seat-sweep-up": "sweeper-up",
+    "explore-std": "researcher-std",
+    "explore-up": "researcher-up",
+    "plan-std": "planner-std",
+    "plan-up": "planner-up",
+    "worker-std": "worker-std",
+    "worker-up": "worker-up"
   }
 }

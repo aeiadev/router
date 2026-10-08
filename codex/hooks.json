@@ -9,6 +9,26 @@
             "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/codex_spawn_guard.py\""
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/context_guard.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/prompt_hint.py\""
+          }
+        ]
       }
     ]
   }

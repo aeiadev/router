@@ -12,6 +12,10 @@ import os
 import re
 import sqlite3
 import sys
+import shutil
+import tempfile
+import textwrap
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
@@ -19,6 +23,7 @@ from typing import NoReturn
 ROUTES_PATH = Path(os.environ.get("ROUTES_JSON") or Path(__file__).resolve().parent / "routes.json").expanduser()
 
 MODES = ("off", "shadow", "enforce")
+AUTO_MODES = ("off", "suggest", "nudge", "enforce")
 MODELS = ("haiku", "sonnet", "opus")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 NO_EFFORT = "none"  # haiku tiers carry no effort line; only haiku may (and must) use it
@@ -74,6 +79,215 @@ def off_file() -> Path:
     """The single persistent switch; presence disables every router hook."""
     value = os.environ.get("ROUTER_OFF_FILE")
     return Path(value).expanduser() if value else state_path() / "OFF"
+
+
+def auto_mode() -> str:
+    """Read the user setting beside OFF; absent or invalid state defaults to nudge."""
+    try:
+        mode = (off_file().parent / "auto").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return "nudge"
+    return mode if mode in AUTO_MODES else "nudge"
+
+
+def set_auto_mode(mode: str) -> None:
+    if mode not in AUTO_MODES:
+        raise ValueError("invalid automatic routing mode")
+    path = off_file().parent / "auto"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".auto-{os.getpid()}")
+    try:
+        with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as stream:
+            stream.write(mode + "\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def render_defaults(host, routes, mode, *, template=None) -> str:
+    """Render host guidance from the same values used by the routing hooks."""
+    if host not in ("claude", "codex") or mode not in AUTO_MODES:
+        raise ValueError("invalid defaults host or automatic routing mode")
+    if template is None:
+        root = Path(__file__).resolve().parents[2]
+        folder = root / "templates"
+        if not folder.is_dir():
+            folder = root / "router/templates"
+        template = (folder / f"defaults.{host}.md").read_text(encoding="utf-8")
+    context = routes["context"]
+    roles_by_cap = {}
+    for role in ("builder", "judge", "sweeper", "researcher", "planner", "worker"):
+        cap = context["caps"][routes["router"]["types"][role]["class"]]
+        roles_by_cap.setdefault(cap, []).append(role + "s")
+
+    def join_roles(roles):
+        if len(roles) == 1:
+            return roles[0]
+        if len(roles) == 2:
+            return " and ".join(roles)
+        return ", ".join(roles[:-1]) + " and " + roles[-1]
+
+    return_limits = ", ".join(
+        f"{cap} {'characters ' if index == 0 else ''}for {join_roles(roles_by_cap[cap])}"
+        for index, cap in enumerate(sorted(roles_by_cap))
+    )
+    values = {
+        "files_threshold": context["files_threshold"],
+        "command_threshold": context["command_threshold"],
+        "chain_first": context["chain"]["first"],
+        "return_limits": return_limits,
+        "enforce_clause": (", and in enforce mode it blocks further reads until you delegate"
+                           if mode == "enforce" else ""),
+    }
+
+    def replace(match):
+        key = match.group(1)
+        if key not in values:
+            raise ValueError(f"unknown defaults placeholder: {key}")
+        return str(values[key])
+
+    rendered = re.sub(r"\{\{(.*?)\}\}", replace, template, flags=re.DOTALL)
+    if "{{" in rendered or "}}" in rendered:
+        raise ValueError("malformed defaults placeholder")
+    # Rewrap every bullet with its continuation lines so any value stays within 80 columns.
+    rendered = re.sub(
+        r"(?m)^- .*(?:\n  .*)*",
+        lambda match: textwrap.fill(
+            " ".join(match.group(0).split()),
+            width=78,
+            subsequent_indent="  ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        ),
+        rendered,
+    )
+    # The managed range ends at the comment, never at an outside newline.
+    return rendered.rstrip("\n")
+
+
+def defaults_span(data: bytes):
+    """Find the single complete marker pair; reject ambiguous or broken pairs."""
+    tokens = list(re.finditer(rb"<!--\s*router:defaults:", data))
+    if not tokens:
+        return None
+    start = re.compile(rb"<!-- router:defaults:start(?: [^\r\n<>]*?)? -->")
+    end = re.compile(rb"<!-- router:defaults:end -->")
+    first = start.match(data, tokens[0].start())
+    last = end.match(data, tokens[-1].start())
+    if len(tokens) != 2 or first is None or last is None or first.end() > last.start():
+        raise ValueError("defaults markers must be one complete, ordered start/end pair")
+    return first.start(), last.end()
+
+
+def defaults_manifest(home: Path):
+    """Load ownership without following a manifest or directory symlink."""
+    path = home / "router/install-manifest.json"
+    if (home / "router").is_symlink() or path.is_symlink():
+        raise ValueError(f"defaults manifest must not be a symlink: {path}")
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid defaults manifest: {path}")
+    return value
+
+
+def plan_defaults(home: Path, host: str, record, block):
+    """Prepare a byte-exact edit without writing; None means remove the block."""
+    path = home / ("CLAUDE.md" if host == "claude" else "AGENTS.md")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(f"defaults instructions must be a regular file: {path}")
+    if record is not None and (not isinstance(record, dict) or
+                               type(record.get("created")) is not bool):
+        raise ValueError("invalid defaults ownership in install manifest")
+    before = path.read_bytes() if path.exists() else b""
+    try:
+        span = defaults_span(before)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+    replacement = block.encode("utf-8") if block is not None else b""
+    metadata = dict(record) if record is not None else {"created": not path.exists()}
+    if span is None:
+        separator = b"\n" if replacement and before and not before.endswith(b"\n") else b""
+        after = before + separator + replacement
+        metadata["separator"] = bool(separator)
+    else:
+        start, end = span
+        if block is None and metadata.get("separator") and before[:start].endswith(b"\n"):
+            start -= 1
+        after = before[:start] + replacement + before[end:]
+    backup = None
+    if before != after and path.exists() and not metadata["created"] and not metadata.get("backup"):
+        backup = path.with_name(f"{path.name}.router-backup-{time.time_ns()}")
+        metadata["backup"] = backup.name
+    remove = block is None and metadata["created"] and not after
+    return {"path": path, "before": before, "after": after, "backup": backup,
+            "record": metadata, "remove": remove}
+
+
+def write_bytes_atomic(path: Path, data: bytes):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".router-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def apply_defaults(plan):
+    path = plan["path"]
+    if plan["backup"] is not None:
+        shutil.copy2(path, plan["backup"])
+    if plan["remove"]:
+        path.unlink(missing_ok=True)
+    elif plan["before"] != plan["after"]:
+        write_bytes_atomic(path, plan["after"])
+
+
+def refresh_defaults(mode: str):
+    """Preflight all known hosts before changing guidance or the shared mode."""
+    homes = {host: _env_path(host.upper() + "_HOME", "." + host)
+             for host in ("claude", "codex")}
+    # An installed CLI also knows its own home without environment overrides.
+    root = Path(__file__).resolve().parents[2]
+    manifest = defaults_manifest(root)
+    if manifest.get("defaults"):
+        host = manifest["defaults"].get("host")
+        if host in homes:
+            homes[host] = root
+    plans = []
+    skipped = []
+    for host, home in homes.items():
+        manifest = defaults_manifest(home)
+        record = manifest.get("defaults")
+        if record is not None:
+            path = home / ("CLAUDE.md" if host == "claude" else "AGENTS.md")
+            if not path.exists():
+                skipped.append(path)
+                continue
+            try:
+                span = defaults_span(path.read_bytes())
+            except ValueError as exc:
+                raise ValueError(f"{path}: {exc}") from exc
+            if span is None:
+                skipped.append(path)
+                continue
+            routes = load_routes(os.environ.get("ROUTES_JSON") or home / "hooks/router/routes.json")
+            template = (home / "router/templates" / f"defaults.{host}.md").read_text(encoding="utf-8")
+            block = render_defaults(host, routes, mode, template=template)
+            plan = plan_defaults(home, host, record, block)
+            plans.append((home, manifest, plan))
+    for home, manifest, plan in plans:
+        apply_defaults(plan)
+        if manifest["defaults"] != plan["record"]:
+            manifest["defaults"] = plan["record"]
+            write_bytes_atomic(home / "router/install-manifest.json",
+                               (json.dumps(manifest, indent=2) + "\n").encode())
+    return skipped
 
 
 def state_dir() -> Path:
@@ -372,10 +586,17 @@ def effective_mode(rule_mode, data=None, routes=None, env=None) -> str:
 
 # Prompt parsing
 
+def canonical_role(agent_type, routes):
+    """Resolve one deprecated name, preserving explicit tiers and unknown roles."""
+    name = agent_type.strip() if isinstance(agent_type, str) else ""
+    aliases = routes.get("aliases", {})
+    return next((target for alias, target in aliases.items() if alias.lower() == name.lower()), name)
+
+
 def classify(agent_type, routes) -> dict | None:
     """Look up an agent type or tier agent name, case-insensitively; None when unknown."""
-    name = agent_type.strip() if isinstance(agent_type, str) else ""
-    wanted = (name or "general-purpose").lower()
+    name = canonical_role(agent_type, routes)
+    wanted = (name or "worker").lower()
     types = _router(routes).get("types")
     if not isinstance(types, dict):
         return None
@@ -766,13 +987,13 @@ def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin
     """Return allow, rewrite, or block, without reading or writing state."""
     ti = tool_input if isinstance(tool_input, dict) else {}
     raw_type = ti.get("subagent_type")
-    asked_type = raw_type.strip() if isinstance(raw_type, str) and raw_type.strip() else "general-purpose"
+    asked_type = raw_type.strip() if isinstance(raw_type, str) and raw_type.strip() else "worker"
     prompt = ti.get("prompt") if isinstance(ti.get("prompt"), str) else ""
     router = routes.get("router", {})
     model = norm_model(ti.get("model"), router.get("never", []))
     prior = prior if isinstance(prior, list) else []
     res = {"decision": "allow", "rule": "allow", "notes": [], "shadow": [],
-           "updated": None, "message": None, "run_type": asked_type, "run_model": model,
+           "updated": None, "message": None, "asked_type": asked_type, "run_type": asked_type, "run_model": model,
            "class": None, "tier": None, "route_kind": None, "route_code": None,
            "risk": [], "brief": brief_hash(prompt), "round": None}
 
@@ -860,8 +1081,10 @@ def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin
 
     levels = routes.get("tiers", {}).get(base, {})
     if not entry.get("tiered") or not levels:
-        target = "opus" if cls == "judge" else entry.get("inject")
-        if target and (model is None or cls == "judge") and mode("inject") == "enforce":
+        target = "opus" if cls == "judge" or (ladder and rnd == 3 and mode("ladder") == "enforce") else entry.get("inject")
+        res["tier"] = "up" if target == "opus" else "std"
+        force = ladder and mode("ladder") == "enforce"
+        if target and (force or ((model is None or cls == "judge") and mode("inject") == "enforce")):
             updated = dict(ti, subagent_type=asked_type, model=target)
             if cls == "judge":
                 updated.pop("resume", None)
@@ -904,7 +1127,7 @@ def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin
     if ladder and mode("ladder") == "enforce":
         target_model = "opus" if rnd == 3 else "sonnet"
     updated = dict(ti, subagent_type=spec["agent"], model=target_model)
-    if base == "seat-exec":
+    if base == "builder":
         updated["isolation"] = "worktree"
     if cls == "judge":
         updated.pop("resume", None)
@@ -984,10 +1207,23 @@ def decide_codex_spawn(tool_input, routes, modes, prior) -> dict:
     result["brief"] = brief
     result["run_type"] = role
     result["run_model"] = None  # selected by the editable role TOML, never guessed here
+    canonical = canonical_role(role, routes)
+    if canonical != role and isinstance(role, str) and effective_mode(modes.get("redirect")) != "off":
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+        if not (home / "agents" / (role + ".toml")).is_file():
+            if effective_mode(modes.get("redirect")) == "enforce":
+                result.update(decision="block", rule="codex-alias", updated=None, run_type=canonical,
+                              message=f"Deprecated agent_type {role} has no installed TOML. Retry with agent_type {canonical} and the same task_name.")
+                return result
+            result["shadow"].append("codex-alias")
+    if canonical != role and isinstance(role, str):
+        result["run_type"] = canonical
     if result["decision"] == "block":
         if result["rule"] == "ladder-needs-up" and "up" in levels:
             result["message"] = ("Round 3 requires agent_type " + levels["up"]["agent"]
                                  + " with the same task_name; this is the upper-tier ladder attempt.")
+        elif result["rule"] == "ladder-needs-up" and not levels:
+            result["message"] = "Round 3 needs an upper-tier role, but this role has no tier TOML. Return to planning with the owner."
         elif result["rule"] == "ladder-owner":
             result["message"] = "This task/role has run three times. Return to planning with the owner."
         return result

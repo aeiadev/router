@@ -126,19 +126,19 @@ class CommonTests(unittest.TestCase):
         mutations = [
             (lambda r: r["router"]["modes"].update(risk="invalid"), "risk"),
             (lambda r: r["context"]["modes"].update(large_read="invalid"), "large_read"),
-            (lambda r: r["tiers"]["seat-exec"]["std"].update(model="unknown"), "model"),
-            (lambda r: r["tiers"]["seat-exec"]["std"].update(effort="none"), "effort"),
-            (lambda r: r["tiers"]["seat-sweep"]["light"].update(effort="low"), "effort"),
-            (lambda r: r["tiers"]["seat-exec"]["std"].update(agent="other"), "agent"),
-            (lambda r: r["tiers"]["Plan"]["up"].update(agent="plan-std"), "duplicate"),
+            (lambda r: r["tiers"]["builder"]["std"].update(model="unknown"), "model"),
+            (lambda r: r["tiers"]["builder"]["std"].update(effort="none"), "effort"),
+            (lambda r: r["tiers"]["sweeper"]["light"].update(effort="low"), "effort"),
+            (lambda r: r["tiers"]["builder"]["std"].update(agent="other"), "agent"),
+            (lambda r: r["tiers"]["planner"]["up"].update(agent="planner-std"), "duplicate"),
             (lambda r: r["context"]["caps"].pop("exec"), "exec"),
             (lambda r: r["context"]["caps"].update(judge=0), "judge"),
             (lambda r: r["context"]["caps"].update(sweep=True), "sweep"),
-            (lambda r: r["router"]["types"]["Plan"].pop("allow"), "allow"),
-            (lambda r: r["router"]["types"]["Plan"].pop("class"), "class"),
+            (lambda r: r["router"]["types"]["planner"].pop("allow"), "allow"),
+            (lambda r: r["router"]["types"]["planner"].pop("class"), "class"),
             (lambda r: r.pop("router"), "router"),
-            (lambda r: r["tier_sources"]["Plan"].pop("source"), "source"),
-            (lambda r: r["tier_sources"]["Plan"].update(prefix=7), "prefix"),
+            (lambda r: r["tier_sources"]["planner"].pop("source"), "source"),
+            (lambda r: r["tier_sources"]["planner"].update(prefix=7), "prefix"),
             (lambda r: r["router"]["unlisted"].update(default_model="unknown"), "default_model"),
             (lambda r: r["router"]["unlisted"].update(models=[]), "models"),
             (lambda r: r["router"]["unlisted"].pop("mode_key"), "mode_key"),
@@ -239,8 +239,8 @@ class CommonTests(unittest.TestCase):
                 classified = self.common.classify(spec["agent"].upper(), self.routes)
                 self.assertEqual((classified["base"], classified["tier"]), (base, tier))
         self.assertIsNone(self.common.classify("unknown-agent", self.routes))
-        self.assertIsNone(self.common.classify("explore-mid", self.routes))
-        self.assertEqual(self.common.classify("", self.routes)["base"], "general-purpose")
+        self.assertIsNone(self.common.classify("researcher-mid", self.routes))
+        self.assertEqual(self.common.classify("", self.routes)["base"], "worker")
 
     def test_route_lines_require_a_known_code_and_take_the_first_match(self):
         parse = lambda prompt: self.common.route_line(prompt, self.routes)
