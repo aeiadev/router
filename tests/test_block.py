@@ -60,6 +60,7 @@ class ContractTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.tmp = Path(temporary.name)
         env = patch.dict(os.environ, HOME=str(self.tmp / "home"),
+                         XDG_CONFIG_HOME=str(self.tmp / "config"), ROUTER_LOCAL="off",
                          CLAUDE_HOME=str(self.tmp / "claude"), ROUTER_HOME=str(self.tmp / "router"),
                          ROUTER_STATE=str(self.tmp / "state"), ROUTER_OFF_FILE=str(self.tmp / "OFF"),
                          ROUTER_OFF="0", ROUTES_JSON=str(HOOKS / "routes.json"))
@@ -78,6 +79,22 @@ class ContractTests(unittest.TestCase):
 
     def test_public_delegation_contract(self):
         self.assertEqual(contract_errors(self.routes), [])
+
+    def test_caller_overlay_does_not_change_modes(self):
+        overlay = self.tmp / "caller.json"
+        overlay.write_text('{"router":{"modes":{"ladder":"shadow"}}}')
+        hostile = {"HOME": "/hostile-home", "ROUTER_LOCAL": str(overlay),
+                   "XDG_CONFIG_HOME": str(self.tmp / "caller-config")}
+        with patch.dict(os.environ, hostile):
+            fresh = ContractTests("test_public_delegation_contract")
+            fresh.setUp()
+            try:
+                self.assertEqual((os.environ["HOME"], os.environ["XDG_CONFIG_HOME"], os.environ["ROUTER_LOCAL"]),
+                                 (str(fresh.tmp / "home"), str(fresh.tmp / "config"), "off"))
+                self.assertEqual(fresh.modes["ladder"], "enforce")
+                self.assertEqual(fresh.modes, self.modes)
+            finally:
+                fresh.doCleanups()
 
     def test_contract_rejects_drift_with_specific_diagnostics(self):
         mutations = [

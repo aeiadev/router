@@ -1,0 +1,17 @@
+{
+  "name": "router",
+  "owner": {
+    "name": "AEIA",
+    "url": "https://aeia.dev"
+  },
+  "plugins": [
+    {
+      "name": "router",
+      "source": "./plugins/router"
+    },
+    {
+      "name": "shared-roles",
+      "source": "./plugins/shared-roles"
+    }
+  ]
+}

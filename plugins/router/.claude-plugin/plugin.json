@@ -1,0 +1,12 @@
+{
+  "name": "router",
+  "version": "0.3.0",
+  "description": "Routing hooks, tier agents, the dispatch skill and the router command: bounded subagent tasks go to the model that fits them and each result to a fresh judge.",
+  "author": {
+    "name": "AEIA",
+    "url": "https://aeia.dev"
+  },
+  "homepage": "https://github.com/aeiadev/router",
+  "repository": "https://github.com/aeiadev/router",
+  "license": "MIT"
+}

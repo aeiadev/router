@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks/router"))
@@ -17,8 +18,108 @@ import common
 
 MARKER = re.compile(r"<!-- router:defaults:start(?: [^\r\n<>]*?)? -->|<!-- router:defaults:end -->")
 
+_test_home = tempfile.TemporaryDirectory()
+os.environ.update(HOME=_test_home.name, XDG_CONFIG_HOME=str(Path(_test_home.name) / "config"), ROUTER_LOCAL="off")
+
 
 class RenderTests(unittest.TestCase):
+    def test_host_ladder_and_mode_language(self):
+        routes = common.load_routes()
+        count = routes["context"]["chain"]["first"]
+        for host in ("claude", "codex"):
+            for mode in common.AUTO_MODES:
+                with self.subTest(host=host, mode=mode):
+                    block = common.render_defaults(host, routes, mode)
+                    flat = " ".join(block.split())
+                    reminder = (f"Automatic routing is off, so nothing reminds you; delegate on your own after {count} reads in a row."
+                                if mode == "off" else f"After {count} reads in a row the router reminds you" +
+                                (", and it blocks further reads until you delegate." if mode == "enforce" else "."))
+                    self.assertIn(reminder, flat)
+                    self.assertIn(f"As a guide, more than {routes['context']['command_threshold']} commands of digging also deserves a role; the router does not count commands.", flat)
+                    self.assertLess(len(block.splitlines()), 25)
+                    self.assert_lines_fit(block)
+                    if host == "codex":
+                        self.assertIn("builder-up", flat)
+                        self.assertIn("same task_name", flat)
+                        self.assertNotIn("route: up ladder", flat)
+                    else:
+                        self.assertIn("route: up ladder", flat)
+                        self.assertNotIn("builder-up", flat)
+        changed = copy.deepcopy(routes)
+        changed["context"]["chain"]["first"] = 9
+        changed["context"]["command_threshold"] = 7
+        self.assertIn("after 9 reads", common.render_defaults("claude", changed, "off"))
+        self.assertIn("more than 7 commands", common.render_defaults("codex", changed, "nudge"))
+        self.assertIn("7", common.render_defaults("claude", changed, "nudge", template="{{command_threshold}}"))
+
+    def sentences(self, text):
+        flat = " ".join(text.split())
+        return [x for x in re.split(r"(?<=[.!?])\s+|\s+-\s+(?=[A-Z])", flat) if x]
+
+    def test_reminder_and_enforcement_never_share_the_guide_sentence(self):
+        routes = common.load_routes()
+        count = routes["context"]["chain"]["first"]
+        texts = [("snippet " + name, (ROOT / "examples" / name).read_text(), "nudge")
+                 for name in ("CLAUDE.md.snippet", "CODEX.md.snippet")]
+        for host in ("claude", "codex"):
+            for mode in common.AUTO_MODES:
+                texts.append((f"{host} {mode}", common.render_defaults(host, routes, mode), mode))
+        for label, text, mode in texts:
+            with self.subTest(label=label):
+                found = self.sentences(text)
+                for sentence in found:
+                    if "commands of digging" in sentence:
+                        self.assertNotIn("reminds you", sentence)
+                        self.assertNotIn("blocks", sentence)
+                        self.assertNotIn("enforce", sentence)
+                reminders = [x for x in found if "reads in a row" in x]
+                self.assertEqual(len(reminders), 1, found)
+                self.assertNotIn("commands", reminders[0])
+                blocks = [x for x in found if "blocks further reads" in x]
+                self.assertEqual(len(blocks), 1 if mode == "enforce" else 0, found)
+                if mode == "enforce":
+                    self.assertEqual(blocks, reminders)
+
+    def test_old_enforce_clause_template_still_renders(self):
+        routes = common.load_routes()
+        old = "- After {{chain_first}} reads in a row the router reminds you{{enforce_clause}}.\n"
+        count = routes["context"]["chain"]["first"]
+        for host in ("claude", "codex"):
+            for mode in common.AUTO_MODES:
+                with self.subTest(host=host, mode=mode):
+                    out = common.render_defaults(host, routes, mode, template=old)
+                    self.assertNotIn("{{", out)
+                    self.assertNotIn("}}", out)
+                    tail = (", and in enforce mode it blocks further reads until you delegate"
+                            if mode == "enforce" else "")
+                    self.assertEqual(" ".join(out.split()),
+                                     f"- After {count} reads in a row the router reminds you{tail}.")
+
+    def test_guide_sentence_fullmatches_with_real_threshold(self):
+        routes = common.load_routes()
+        changed = copy.deepcopy(routes)
+        changed["context"]["command_threshold"] = 7
+        for table in (routes, changed):
+            number = table["context"]["command_threshold"]
+            expected = (f"As a guide, more than {number} commands of digging also deserves a role; "
+                        "the router does not count commands.")
+            for host in ("claude", "codex"):
+                for mode in common.AUTO_MODES:
+                    with self.subTest(host=host, mode=mode, number=number):
+                        found = [x for x in self.sentences(common.render_defaults(host, table, mode))
+                                 if "commands of digging" in x]
+                        self.assertEqual(len(found), 1, found)
+                        self.assertRegex(found[0], re.compile(re.escape(expected)))
+                        self.assertIsNotNone(re.fullmatch(re.escape(expected), found[0]), found[0])
+        self.assertIn("7", common.render_defaults("claude", changed, "nudge", template="{{command_threshold}}"))
+
+    def test_caller_overlay_is_ignored(self):
+        routes = common.load_routes()
+        with tempfile.TemporaryDirectory() as tmp:
+            decoy = Path(tmp) / "decoy.json"
+            decoy.write_text('{"context":{"files_threshold":99}}')
+            with patch.dict(os.environ, {"ROUTER_LOCAL": "off", "XDG_CONFIG_HOME": tmp}):
+                self.assertEqual(common.load_routes()["context"]["files_threshold"], routes["context"]["files_threshold"])
     def test_render_values_and_examples(self):
         routes = common.load_routes()
         self.assertEqual(routes["context"]["command_threshold"], 2)
@@ -161,6 +262,20 @@ class LifecycleTests(unittest.TestCase):
         self.install("--uninstall")
         for path in self.paths.values():
             self.assertEqual(path.read_bytes(), prefix + suffix)
+
+    def test_auto_rewrites_reminder_and_preserves_outside(self):
+        prefix, suffix = b"outside before\n", b"\noutside after"
+        for path in self.paths.values():
+            path.write_bytes(prefix + b"<!-- router:defaults:start -->\nold\n<!-- router:defaults:end -->" + suffix)
+        self.install("--with-defaults")
+        for mode, phrase in (("off", "nothing reminds you"),
+                             ("enforce", "blocks further reads until you delegate")):
+            self.cli(mode)
+            for path in self.paths.values():
+                data = path.read_bytes()
+                self.assertTrue(data.startswith(prefix))
+                self.assertTrue(data.endswith(suffix))
+                self.assertIn(phrase.encode(), data)
 
     def test_insert_append_and_uninstall(self):
         original = b"user text\r\nwith no final newline"

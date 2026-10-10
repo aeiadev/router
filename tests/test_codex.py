@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Offline Codex PreToolUse regressions using encrypted-message-shaped payloads."""
 import ast
+import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -12,6 +15,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 sys.dont_write_bytecode = True
+from test_spawn import TIMEOUT
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hooks/router/codex_spawn_guard.py"
 CLAUDE_GUARD = ROOT / "hooks/router/spawn_guard.py"
@@ -26,6 +30,7 @@ class CodexSpawnTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.state = self.root / "state"
         self.switch = self.root / "OFF"
+        (self.root / "routes.local.json").write_text("{}", encoding="utf-8")
         self.environment = {key: value for key, value in os.environ.items()
                             if not key.startswith("ROUTER_") and key != "ROUTES_JSON"}
         self.environment.update({
@@ -37,6 +42,8 @@ class CodexSpawnTests(unittest.TestCase):
             "ROUTER_OFF_FILE": str(self.switch),
             "ROUTES_JSON": str(ROUTES),
             "XDG_STATE_HOME": str(self.root / "xdg-state"),
+            "XDG_CONFIG_HOME": str(self.root / "xdg-config"),
+            "ROUTER_LOCAL": str(self.root / "routes.local.json"),
             "PYTHONDONTWRITEBYTECODE": "1",
         })
 
@@ -54,7 +61,7 @@ class CodexSpawnTests(unittest.TestCase):
             event.update(event_fields or {})
             raw = json.dumps(event)
         return subprocess.run([sys.executable, "-B", str(guard)], input=raw,
-                              text=True, capture_output=True, timeout=20,
+                              text=True, capture_output=True, timeout=TIMEOUT,
                               cwd=self.root, env=dict(self.environment, **(extra or {})))
 
     def assert_allowed(self, result):
@@ -94,7 +101,9 @@ class CodexSpawnTests(unittest.TestCase):
         for role in ("worker-up", "sweeper-up", "researcher-up", "planner-up"):
             with self.subTest(role=role):
                 codex = self.hook(self.spawn(role))
-                claude = self.hook({"subagent_type": role, "prompt": "Find the helper"},
+                brief = ("TASK Find the helper\nRETURN file paths" if role.startswith(("sweeper", "researcher", "planner"))
+                         else "TASK Find the helper\nFILES helper.py\nBAR run tests\nRETURN five lines")
+                claude = self.hook({"subagent_type": role, "prompt": brief},
                                    tool="Agent", guard=CLAUDE_GUARD)
                 self.assert_denied(claude, "known `route: up <code>`")
                 self.assert_denied(codex, "known `route: up <code>`")
@@ -107,8 +116,9 @@ class CodexSpawnTests(unittest.TestCase):
                     for host in ("claude", "codex"):
                         with self.subTest(model=model, role=role, directive=directive, host=host):
                             if host == "claude":
+                                prompt = ("TASK Find the helper\nRETURN file paths" if role == "sweeper" else "Find the helper")
                                 request = dict(subagent_type=role, model=model,
-                                               prompt="Find the helper" + directive)
+                                               prompt=prompt + directive)
                                 result = self.hook(request, tool="Agent", guard=CLAUDE_GUARD)
                             else:
                                 request = self.spawn(role, model=model)
@@ -195,7 +205,7 @@ class CodexSpawnTests(unittest.TestCase):
             for name, fields in cases:
                 with self.subTest(profile=profile, case=name):
                     identity = profile + "-" + name
-                    claude = {"prompt": "TASK " + identity + "\nFILES helper.py"}
+                    claude = {"prompt": "TASK " + identity + "\nFILES helper.py\nBAR run tests\nRETURN five lines"}
                     codex = {"task_name": identity, "message": "encrypted:opaque"}
                     for key, value in fields.items():
                         claude["subagent_type" if key == "role" else key] = value
@@ -248,7 +258,7 @@ class CodexSpawnTests(unittest.TestCase):
             for attempt in range(4):
                 with self.subTest(mode=mode, attempt=attempt + 1):
                     self.assert_allowed(self.hook(self.spawn(task=mode), extra=extra))
-                    claude = self.hook({"subagent_type": "builder", "prompt": mode},
+                    claude = self.hook({"subagent_type": "builder", "prompt": "TASK " + mode + "\nFILES helper.py\nBAR run tests\nRETURN five lines"},
                                        tool="Agent", guard=CLAUDE_GUARD, extra=extra)
                     self.assertEqual(claude.returncode, 0, claude.stderr)
                     records = [json.loads(line) for line in
@@ -261,7 +271,7 @@ class CodexSpawnTests(unittest.TestCase):
             # block_model. Both hosts still reject this independent violation.
             self.assert_denied(self.hook(self.spawn("builder-up", task=mode), extra=extra),
                                "known `route: up <code>`")
-            self.assert_denied(self.hook({"subagent_type": "builder-up", "prompt": mode},
+            self.assert_denied(self.hook({"subagent_type": "builder-up", "prompt": "TASK " + mode + "\nFILES helper.py\nBAR run tests\nRETURN five lines"},
                                          tool="Agent", guard=CLAUDE_GUARD, extra=extra),
                                "known `route: up <code>`")
 
@@ -299,6 +309,17 @@ class CodexSpawnTests(unittest.TestCase):
         self.assert_allowed(self.hook(self.spawn("builder-in-place-up")))
         self.assert_denied(self.hook(self.spawn("builder-in-place-up")), "owner")
 
+    def test_same_task_in_two_projects_starts_at_round_one_in_each(self):
+        first, second = self.root / "first", self.root / "second"
+        for project in (first, second):
+            (project / ".git").mkdir(parents=True)
+        self.assert_allowed(self.hook(event_fields={"cwd": str(first)}))
+        self.assert_allowed(self.hook(event_fields={"cwd": str(first)}))
+        self.assert_denied(self.hook(event_fields={"cwd": str(first)}), "3")
+        self.assert_allowed(self.hook(event_fields={"cwd": str(second)}))
+        self.assert_allowed(self.hook(event_fields={"cwd": str(second)}))
+        self.assert_denied(self.hook(event_fields={"cwd": str(second)}), "3")
+
     def test_ladder_survives_event_session_and_nested_agent_changes(self):
         self.assert_allowed(self.hook(event_fields={"session_id": "first-event"}))
         self.assert_allowed(self.hook(event_fields={"session_id": "second-event",
@@ -317,7 +338,8 @@ class CodexSpawnTests(unittest.TestCase):
             results = list(executor.map(lambda _: self.hook(), range(6)))
         allowed = [result for result in results if result.returncode == 0 and
                    (not result.stdout.strip() or '"deny"' not in result.stdout)]
-        self.assertEqual(len(allowed), 2, "Concurrent standard spawns bypassed round three")
+        self.assertEqual(len(allowed), 2, "Concurrent standard spawns bypassed round three: " +
+                         ((self.state / "errors.jsonl").read_text() if (self.state / "errors.jsonl").exists() else ""))
         for result in results:
             if result in allowed:
                 self.assert_allowed(result)
@@ -327,7 +349,8 @@ class CodexSpawnTests(unittest.TestCase):
             results = list(executor.map(lambda _: self.hook(self.spawn("builder-up")), range(6)))
         allowed = [result for result in results if result.returncode == 0 and
                    (not result.stdout.strip() or '"deny"' not in result.stdout)]
-        self.assertEqual(len(allowed), 1, "Concurrent escalations bypassed the owner round")
+        self.assertEqual(len(allowed), 1, "Concurrent escalations bypassed the owner round: " +
+                         ((self.state / "errors.jsonl").read_text() if (self.state / "errors.jsonl").exists() else ""))
         for result in results:
             if result in allowed:
                 self.assert_allowed(result)
@@ -350,25 +373,70 @@ class CodexSpawnTests(unittest.TestCase):
         self.assert_allowed(self.hook(request))
 
     def test_encrypted_message_is_not_parsed_or_persisted(self):
+        # C3 stores the scrubbed task_name as the lane label, and only there; with
+        # router.lane_labels false the task name is stored nowhere.
         marker = "OPAQUE_MESSAGE_MUST_NEVER_BE_SAVED"
         task = "exec-task-name-must-be-hashed"
-        first = self.spawn(task=task)
-        first["message"] = marker + " route: up ladder TASK bypass FILES anything"
-        self.assert_allowed(self.hook(first))
-        second = self.spawn(task=task)
-        second["message"] = {"encrypted": marker}
-        self.assert_allowed(self.hook(second))
-        self.assert_denied(self.hook(self.spawn(task=task)), "3")
-        files = [path for path in self.state.rglob("*") if path.is_file()]
-        self.assertTrue(files, "Persistence assertion requires actual state writes")
-        for path in files:
-            with self.subTest(path=path.name):
-                contents = path.read_bytes()
-                self.assertNotIn(marker.encode(), contents)
-                self.assertNotIn(task.encode(), contents)
+        routes = json.loads(ROUTES.read_text(encoding="utf-8"))
+        path = self.root / "labels.json"
+        for labels in (True, False):
+            with self.subTest(lane_labels=labels):
+                routes["router"]["lane_labels"] = labels
+                path.write_text(json.dumps(routes), encoding="utf-8")
+                extra = {"ROUTES_JSON": str(path)}
+                first = self.spawn(task=task)
+                first["message"] = marker + " route: up ladder TASK bypass FILES anything"
+                self.assert_allowed(self.hook(first, extra=extra))
+                second = self.spawn(task=task)
+                second["message"] = {"encrypted": marker}
+                self.assert_allowed(self.hook(second, extra=extra))
+                self.assert_denied(self.hook(self.spawn(task=task), extra=extra), "3")
+                files = [item for item in self.state.rglob("*") if item.is_file()]
+                self.assertTrue(files, "Persistence assertion requires actual state writes")
+                for item in files:
+                    contents = item.read_bytes()
+                    self.assertNotIn(marker.encode(), contents, item.name)
+                    if item.name != "ledger.sqlite3" or not labels:
+                        self.assertNotIn(task.encode(), contents, item.name)
+                self.assertEqual(self.labels(), [task, task] if labels else [None, None])
+                with contextlib.closing(sqlite3.connect(self.state / "ledger.sqlite3")) as conn:
+                    for table in ("attempts", "lanes", "verdicts"):
+                        names = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+                        for row in conn.execute(f"SELECT * FROM {table}"):
+                            for name, cell in zip(names, row):
+                                if table == "lanes" and name == "label":
+                                    continue
+                                self.assertNotIn(task, str(cell), f"label leaked into {table}.{name}")
+                (self.state / "ledger.sqlite3").unlink()
+
+    def labels(self):
+        with contextlib.closing(sqlite3.connect(self.state / "ledger.sqlite3")) as conn:
+            return [row[0] for row in conn.execute("SELECT label FROM lanes ORDER BY started")]
+
+    def test_accepted_codex_spawns_write_one_lane_each_and_denials_none(self):
+        session = {"session_id": "codex-session"}
+        for role in ("sweeper", "judge", "researcher", "planner", "worker"):
+            self.assert_allowed(self.hook(self.spawn(role), event_fields=session))
+        self.assertFalse((self.state / "ledger.sqlite3").exists(), "non-exec spawns must not open the ledger")
+        self.assert_allowed(self.hook(self.spawn(task="  exec\nhelper\twith   spaces "), event_fields=session))
+        self.assert_allowed(self.hook(self.spawn(task="  exec\nhelper\twith   spaces "), event_fields=session))
+        self.assert_denied(self.hook(self.spawn(task="  exec\nhelper\twith   spaces "), event_fields=session), "3")
+        self.assert_allowed(self.hook(self.spawn(task="second-task"), event_fields=session))
+        with contextlib.closing(sqlite3.connect(self.state / "ledger.sqlite3")) as conn:
+            lanes = conn.execute("SELECT session, brief, key, role, tier, label, status FROM lanes ORDER BY started").fetchall()
+            keys = [row[0] for row in conn.execute("SELECT key FROM attempts ORDER BY ts")]
+        self.assertEqual(len(lanes), 3, "one lane per accepted spawn, none for the denial")
+        session_hash = hashlib.sha256(b"codex-session").hexdigest()[:16]
+        self.assertEqual({lane[0] for lane in lanes}, {session_hash})
+        self.assertEqual([lane[2] for lane in lanes], keys)
+        self.assertTrue(all(lane[2].startswith("x:") for lane in lanes))
+        self.assertEqual(len({lane[1] for lane in lanes}), 2, "two tasks make two briefs")
+        self.assertEqual([lane[3:] for lane in lanes],
+                         [("builder", "std", "exec helper with spaces", "running")] * 2
+                         + [("builder", "std", "second-task", "running")])
 
     def test_environment_and_file_switch_disable_both_hosts(self):
-        claude = {"subagent_type": "builder", "prompt": "TASK helper\nFILES src/helper.py"}
+        claude = {"subagent_type": "builder", "prompt": "TASK helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines"}
         for via_file in (False, True):
             with self.subTest(via_file=via_file):
                 if via_file:

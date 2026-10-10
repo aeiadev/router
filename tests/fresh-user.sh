@@ -51,6 +51,11 @@ def tree_snapshot(path):
             for item in path.rglob("*") if item.is_file()}
 
 
+def installed_files_snapshot(path):
+    return {name: data for name, data in tree_snapshot(path).items()
+            if name != "router/install-manifest.json"}
+
+
 def hooks_for(config, script):
     return [(event, block) for event, blocks in config["hooks"].items()
             for block in blocks for hook in block.get("hooks", [])
@@ -106,7 +111,8 @@ try:
                       "hooks/router/common.py", "hooks/router/routes.json", "agents/builder.md",
                       "agents/builder-std.md", "agents/judge.md", "agents/sweeper.md",
                       "skills/dispatch/SKILL.md", "router/bin/router", "router/bin/wait-until.sh",
-                      "router/bin/cite-check.py", "router/bin/close-lane.sh", "router/bin/dispatch-log.py"]
+                      "router/bin/cite-check.py", "router/bin/close-lane.sh"]
+    check(not (claude / ("router/bin/dispatch" + "-log.py")).exists(), "retired helper installed")
     for relative in expected_files:
         check((claude / relative).is_file(), f"installed file missing: {relative}")
     routes = json.loads((claude / "hooks/router/routes.json").read_text())
@@ -136,10 +142,10 @@ try:
     check({event for event, _ in hooks_for(config, "context_guard.py")} == {"SubagentStart", "SubagentStop", "PreToolUse"},
           "settings.json lacks one or more context guard events")
     assert_routing(claude, dict(os.environ))
-    installed = tree_snapshot(claude)
+    installed = installed_files_snapshot(claude)
     install()
-    check(tree_snapshot(claude) == installed, "reinstall changed files or duplicated hooks")
-    scan = run(["grep", "-RIl", "/home/", str(claude)], expected=1)
+    check(installed_files_snapshot(claude) == installed, "reinstall changed files or duplicated hooks")
+    scan = run(["grep", "-RIl", "--exclude=install-manifest.json", "/home/", str(claude)], expected=1)
     check(not scan.stdout, "installed tree contains an absolute home path")
 
     user_hook = {"matcher": "Write", "hooks": [{"type": "command", "command": "printf user-hook"}]}
@@ -194,6 +200,23 @@ try:
     install("--uninstall", environment=custom_env)
     check(json.loads((custom / "settings.json").read_text()) == original, "uninstall did not restore custom settings entries")
 
+    # --purge alone removes backups and nothing else; with --uninstall it runs after the uninstall.
+    purge_home = home / "purge home"
+    purge_home.mkdir()
+    (purge_home / "settings.json").write_text(json.dumps(original))
+    purge_env = dict(os.environ, CLAUDE_HOME=str(purge_home), ROUTER_STATE=str(home / "purge-state"))
+    install(environment=purge_env)
+    backups = list(purge_home.glob("settings.json.router-backup-*"))
+    check(len(backups) == 1 and backups[0].stat().st_mode & 0o777 == 0o600, "install backup missing or not 0600")
+    kept = {name: data for name, data in tree_snapshot(purge_home).items() if ".router-backup-" not in name}
+    purged = install("--purge", environment=purge_env)
+    check(f"Removed backup: {backups[0]}" in purged.stdout, "--purge did not list the backup")
+    check(not list(purge_home.glob("*.router-backup-*")), "--purge left a backup")
+    check(tree_snapshot(purge_home) == kept, "--purge changed the installation")
+    install("--uninstall", "--purge", environment=purge_env)
+    check(not list(purge_home.glob("*.router-backup-*")), "uninstall --purge left a backup")
+    check(json.loads((purge_home / "settings.json").read_text()) == original, "uninstall --purge lost user settings")
+
     missing_path = home / "requirements"
     missing_path.mkdir()
     requirement_env = dict(os.environ, PATH=str(missing_path))
@@ -206,5 +229,5 @@ try:
 except (AssertionError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
     sys.exit(f"fresh-user: FAIL: {exc}")
 
-print("fresh-user: PASS (install, route, switch, settings, dry-run, custom paths, uninstall, requirements)")
+print("fresh-user: PASS (install, route, switch, settings, dry-run, custom paths, uninstall, purge, requirements)")
 PY

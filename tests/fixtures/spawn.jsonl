@@ -38,3 +38,22 @@
 {"name":"unlisted agent receives explicit default","tool_input":{"subagent_type":"custom-helper","prompt":"Find files."},"expect":{"decision":"rewrite","run_type":"custom-helper","run_model":"sonnet"}}
 {"name":"unlisted explicit model unchanged","tool_input":{"subagent_type":"custom-helper","model":"haiku","prompt":"Find files."},"expect":{"decision":"allow","rule":"unlisted","run_model":"haiku"}}
 {"name":"fork with unknown parent unchanged","tool_input":{"subagent_type":"fork","prompt":"Continue work."},"expect":{"decision":"allow","rule":"fork-unknown-model"}}
+{"name": "builder valid brief", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines", "subagent_type": "builder"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "builder-in-place valid brief", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines", "subagent_type": "builder-in-place"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "test-writer valid brief", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines", "subagent_type": "test-writer"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "docs-writer valid brief", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines", "subagent_type": "docs-writer"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "worker valid brief", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines", "subagent_type": "worker"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "judge valid brief", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines", "subagent_type": "judge"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "sweeper valid brief", "tool_input": {"prompt": "TASK inspect helper\nRETURN file paths", "subagent_type": "sweeper"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "researcher valid brief", "tool_input": {"prompt": "TASK inspect helper\nRETURN file paths", "subagent_type": "researcher"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "planner valid brief", "tool_input": {"prompt": "TASK inspect helper\nRETURN file paths", "subagent_type": "planner"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "lowercase colon", "tool_input": {"prompt": "task: build helper\nfiles: src/helper.py\nbar: run tests\nreturn: five lines", "subagent_type": "builder"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "indented fields", "tool_input": {"prompt": "  TASK: build helper\n  FILES: src/helper.py\n  BAR: run tests\n  RETURN: five lines", "subagent_type": "worker"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "multiline files and bar", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\n  src/other.py\nBAR run tests\n  run lint\nRETURN five lines", "subagent_type": "builder"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "notes and route", "tool_input": {"prompt": "TASK inspect helper\nRETURN file paths\nNotes: check docs.\nroute: light", "subagent_type": "researcher"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "crlf brief", "tool_input": {"prompt": "TASK: inspect helper\r\nFILES: src/helper.py\r\nBAR: report paths\r\nRETURN: file paths", "subagent_type": "planner"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "missing agent type", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines"}, "expect": {"decision": "rewrite"}, "brief": "ok"}
+{"name": "missing bar", "tool_input": {"prompt": "TASK build\nFILES a.py\nRETURN lines", "subagent_type": "builder"}, "expect": {"decision": "rewrite"}, "brief": "deny: BAR missing"}
+{"name": "duplicate files", "tool_input": {"prompt": "TASK implement helper\nFILES src/helper.py\nBAR run tests\nRETURN five lines\nFILES b.py", "subagent_type": "worker"}, "expect": {"decision": "rewrite"}, "brief": "deny: FILES appears more than once"}
+{"name": "empty task", "tool_input": {"prompt": "TASK: \nRETURN paths", "subagent_type": "researcher"}, "expect": {"decision": "rewrite"}, "brief": "deny: TASK is empty"}
+{"name": "out of order", "tool_input": {"prompt": "RETURN paths\nTASK inspect", "subagent_type": "planner"}, "expect": {"decision": "rewrite"}, "brief": "deny: RETURN is out of order"}

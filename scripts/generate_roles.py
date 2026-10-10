@@ -8,6 +8,55 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+BUDGET_ROW = "../scripts/budget.py"
+
+CODEX_NOTES = {
+    'judge': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the judge inherits the parent\n'
+        "session's sandbox. This was verified on Codex 0.156.1.\n"
+        '\n'
+        'For Codex, the caller must select the `harness-judge` permission profile from\n'
+        '`codex/judge-permissions.toml` in a dedicated verification session before spawning\n'
+        'the judge with `codex -c default_permissions=harness-judge`. Never combine this\n'
+        'profile with `-s`, which overrides it.\n'
+        'The profile grants temporary writes, keeps workspace roots read-only, and disables\n'
+        'network access. Keep the source repository as the session workspace and set\n'
+        '`TMPDIR` outside it before starting the session. A disposable copy must be outside\n'
+        'every workspace root. If effective permissions do not protect\n'
+        'the source or cannot run the BAR, return SEND_BACK with the blocked requirement.'
+    ),
+    'planner': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the child inherits the parent\n'
+        "session's sandbox. See the README's Codex judge recipe for a restricted parent\n"
+        'session.'
+    ),
+    'researcher': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the child inherits the parent\n'
+        "session's sandbox. See the README's Codex judge recipe for a restricted parent\n"
+        'session.'
+    ),
+    'sweeper': (
+        'On Codex, read-only behavior is requested by these instructions, not enforced.\n'
+        'It is enforced only if the parent session starts with a restricted permission\n'
+        'profile. A Codex role file cannot enforce read-only; the child inherits the parent\n'
+        "session's sandbox. See the README's Codex judge recipe for a restricted parent\n"
+        'session.'
+    ),
+    'test-writer': (
+        'On Codex, these instructions request that production code remain read-only; they\n'
+        'do not enforce that restriction. It is enforced only if the parent session starts\n'
+        'with a permission profile that protects those files. A Codex role file cannot\n'
+        "enforce read-only; the child inherits the parent session's sandbox. See the\n"
+        "README's Codex judge recipe for a restricted parent session."
+    ),
+}
+
 
 
 def parse(text):
@@ -23,10 +72,16 @@ def parse(text):
     return metadata, match[2]
 
 
-def toml(metadata, body, models, shared=False):
+def codex_note(name):
+    """Codex-only guidance lives here, never in the Markdown bodies."""
+    note = CODEX_NOTES.get(name)
+    return "\n## Codex\n\n" + note + "\n" if note else ""
+
+
+def toml(metadata, body, models, shared=False, base=None):
     pin = models[metadata["model"]]
     values = dict(name=metadata["name"], description=metadata["description"],
-                  developer_instructions=body.strip() + "\n",
+                  developer_instructions=body.strip() + "\n" + codex_note(base or metadata["name"]),
                   model=pin["model"], model_reasoning_effort=pin["effort"])
     # Preserve Harness's byte format for the shared base TOMLs.
     generator = "codex/generate_agents.py" if shared else "scripts/generate_roles.py"
@@ -34,14 +89,26 @@ def toml(metadata, body, models, shared=False):
         f"{key} = {json.dumps(value, ensure_ascii=False)}\n" for key, value in values.items())
 
 
-def expected(root):
+def expected(root, pin=False):
     routes = json.loads((root / "hooks/router/routes.json").read_text())
     bases = {}
-    for row in (root / "agents/SHARED.sha256").read_text().splitlines():
+    toml_pins = {}
+    rows = (root / "agents/SHARED.sha256").read_text().splitlines()
+    for row in rows:
         digest, name = row.split()
+        if name.endswith(".py"):
+            # A script row is hash-checked only; it is never parsed as a role.
+            if name != BUDGET_ROW:
+                raise ValueError(f"unexpected pin row: {name}")
+            if not pin and hashlib.sha256((root / "agents" / name).read_bytes()).hexdigest() != digest:
+                raise ValueError("shared script drift: scripts/budget.py")
+            continue
+        if name.endswith(".toml"):
+            toml_pins[name] = digest
+            continue
         path = root / "agents" / name
         payload = path.read_bytes()
-        if hashlib.sha256(payload).hexdigest() != digest:
+        if not pin and hashlib.sha256(payload).hexdigest() != digest:
             raise ValueError(f"shared role drift: agents/{name}")
         metadata, body = parse(payload.decode("utf-8"))
         if metadata["name"] != path.stem:
@@ -50,6 +117,9 @@ def expected(root):
     wanted = {}
     for base, (metadata, body) in bases.items():
         wanted[f"codex/agents/{base}.toml"] = toml(metadata, body, routes["codex_models"], shared=True)
+        pinned = toml_pins.pop(f"../codex/agents/{base}.toml", None)
+        if not pin and pinned != hashlib.sha256(wanted[f"codex/agents/{base}.toml"].encode("utf-8")).hexdigest():
+            raise ValueError(f"shared role drift: codex/agents/{base}.toml")
         for tier, spec in routes["tiers"].get(base, {}).items():
             source = routes["tier_sources"][base]
             if source["source"] != f"agents/{base}.md":
@@ -61,16 +131,26 @@ def expected(root):
                 fields["effort"] = spec["effort"]
             wanted[f"agents/{spec['agent']}.md"] = "---\n" + "".join(
                 f"{key}: {value}\n" for key, value in fields.items()) + "---\n" + body
-            wanted[f"codex/agents/{spec['agent']}.toml"] = toml(fields, body, routes["codex_models"])
+            wanted[f"codex/agents/{spec['agent']}.toml"] = toml(fields, body, routes["codex_models"], base=base)
+    if toml_pins:
+        raise ValueError("pins for unknown roles: " + ", ".join(sorted(toml_pins)))
+    if pin:
+        names = sorted(bases, key=lambda base: base + ".md")
+        rows = [hashlib.sha256((root / f"agents/{base}.md").read_bytes()).hexdigest() + f"  {base}.md" for base in names]
+        rows += [hashlib.sha256(wanted[f"codex/agents/{base}.toml"].encode("utf-8")).hexdigest()
+                 + f"  ../codex/agents/{base}.toml" for base in names]
+        rows.append(hashlib.sha256((root / "agents" / BUDGET_ROW).read_bytes()).hexdigest() + "  " + BUDGET_ROW)
+        (root / "agents/SHARED.sha256").write_text("\n".join(rows) + "\n")
     return bases, wanted
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail on missing, extra, or changed generated files")
+    parser.add_argument("--pin", action="store_true", help="rewrite agents/SHARED.sha256 from the current roles, then generate")
     args = parser.parse_args()
     try:
-        bases, wanted = expected(ROOT)
+        bases, wanted = expected(ROOT, pin=args.pin and not args.check)
         actual = {str(path.relative_to(ROOT)) for folder, suffix in (("agents", "*.md"), ("codex/agents", "*.toml"))
                   for path in (ROOT / folder).glob(suffix)} - {f"agents/{base}.md" for base in bases}
         extra = actual - wanted.keys()

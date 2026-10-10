@@ -6,7 +6,9 @@ and routes table are temp paths; time is driven by ROUTER_TEST_NOW_MS.
 Exit 0 only when all cases pass.
 """
 import json
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,6 +49,8 @@ class Env:
         env = dict(os.environ)
         env["HOME"] = str(self.tmp / "home")
         env["XDG_STATE_HOME"] = str(self.tmp / "xdg-state")
+        env["XDG_CONFIG_HOME"] = str(self.tmp / "xdg-config")
+        env["ROUTER_LOCAL"] = "off"
         env["CLAUDE_HOME"] = str(self.tmp / "claude")
         env["ROUTER_HOME"] = str(self.tmp / "router-home")
         env["ROUTER_STATE"] = str(self.state)
@@ -78,6 +82,15 @@ class Env:
     def chain(self):
         path = self.state / "chain" / f"{SID}.json"
         return json.loads(path.read_text()) if path.exists() else None
+
+    def pressure(self, level="remind", percent=72, host="claude", ts=None):
+        name = hashlib.sha256(SID.encode()).hexdigest()[:16] + ".json"
+        path = self.tmp / "xdg-state/claude-harness/pressure" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": 1, "host": host, "ts": time.time() if ts is None else ts,
+                                    "used": 720, "window": 1000, "window_source": "statusline",
+                                    "percent": percent, "level": level}))
+        return path
 
 
 def event(name, env, **fields):
@@ -635,6 +648,122 @@ def case_38_reports_do_not_expand_write_scope():
         reason = json.loads(proc.stdout)["reason"]
         check("when the task allows writing there" in reason, f"{agent_type}: overflow respects write scope")
         check("Otherwise trim the message to fit" in reason, f"{agent_type}: overflow permits no-file recovery")
+
+
+def case_39_router_commands_leave_the_chain_alone():
+    env = Env()
+    drive(env, 4)
+    # Inside the same turn an ordinary call would reset the count; a plain router command is skipped.
+    proc = env.run(bash_ev(env, "router status"), now_ms=T0 + 4 * 2000 + 500)
+    check(proc.returncode == 0 and proc.stdout == "" and env.chain()["count"] == 4, f"state {env.chain()}")
+    proc = env.run(bash_ev(env), now_ms=T0 + 5 * 2000)
+    check("5 consecutive" in ctx(proc), "note on the fifth read after a router command")
+    proc = env.run(bash_ev(env, "echo router x"), now_ms=T0 + 5 * 2000 + 500)
+    check(env.chain()["count"] == 0, f"a command that only mentions router is ordinary: {env.chain()}")
+
+
+def case_40_chain_note_names_researcher():
+    env = Env()
+    text = ctx(drive(env, 5)[-1])
+    check("sweeper or researcher" in text and "explore" not in text, f"nudge wording: {text}")
+
+
+def case_41_pressure_tightens_chain():
+    env = Env()
+    env.pressure("remind")
+    out = drive(env, 3)[-1]
+    check(bool(re.fullmatch(
+        r"Context note \(delegation guard\): 3 consecutive single read-type tool calls in the main loop with no spawn in between\. Delegate a multi-step investigation to sweeper or researcher to keep detailed results out of the main context\. Context is at remind \(72%\): delegate reads and sweeps\.",
+        ctx(out))), ctx(out))
+
+
+def case_42_router_redirection_counts():
+    for command in ("router x > f", "router x >> f", "router x < f", "router x 2>&1",
+                    "router x | head", "router x; ls", "echo router x"):
+        env = Env()
+        drive(env, 1)
+        env.run(bash_ev(env, command), now_ms=T0 + 2500)
+        check(env.chain()["count"] == 0, f"{command}: {env.chain()}")
+    for command in ("router status", "router lanes --all", "router config get x"):
+        env = Env()
+        drive(env, 1)
+        env.run(bash_ev(env, command), now_ms=T0 + 2500)
+        check(env.chain()["count"] == 1, f"{command}: {env.chain()}")
+
+
+def case_43_urgent_large_read_and_stale_signal():
+    env = Env(set_modes(large_read="enforce"))
+    big = env.tmp / "mid.txt"
+    big.write_bytes(b"x" * 13000)
+    event = pre_ev(env, "Read", {"file_path": str(big)})
+    check(env.run(event, now_ms=T0).returncode == 0, "base limit permits 13 KB")
+    env.pressure("urgent", 91)
+    blocked = env.run(event, now_ms=T0 + 2000)
+    check(blocked.returncode == 2 and bool(re.fullmatch(
+        r"Context is at urgent \(91%\): Blocked by the delegation guard: this file is 13 KB and the Read has no limit\. Search first \(rg\), then Read with offset and limit, or send a sweeper\.\n",
+        blocked.stderr)), blocked.stderr)
+    env.pressure("urgent", ts=time.time() - 601)
+    check(env.run(event, now_ms=T0 + 4000).returncode == 0, "stale signal ignored")
+    signal_path = env.pressure("urgent", host="codex")
+    check(env.run(event, now_ms=T0 + 6000).returncode == 0, "wrong host ignored")
+    signal_path.write_text("{broken")
+    check(env.run(event, now_ms=T0 + 8000).returncode == 0, "malformed signal ignored")
+
+
+def case_44_invalid_local_override_uses_shipped_table():
+    env = Env()
+    config = env.tmp / "xdg-config/router/routes.local.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"context": {"pressure": {"remind": {"chain_first": 99}}}}))
+    env.pressure("remind")
+    original_env = env.env
+    def with_local(now_ms=None):
+        values = original_env(now_ms)
+        values["ROUTER_LOCAL"] = str(config)
+        return values
+    env.env = with_local
+    result = drive(env, 3)[-1]
+    check("3 consecutive" in ctx(result), "invalid override falls back to shipped pressure")
+    check(len(env.log("errors")) == 1, "invalid override logged once")
+
+
+def case_45_urgent_second_read_note_and_host_override():
+    for host, fields in (("claude", {}), ("codex", {"harness_host": "codex"})):
+        env = Env()
+        env.pressure("urgent", 91, host=host)
+        first = env.run(pre_ev(env, "Bash", {"command": "cat a"}, **fields), now_ms=T0 + 2000)
+        second = env.run(pre_ev(env, "Bash", {"command": "cat a"}, **fields), now_ms=T0 + 4000)
+        check(first.stdout == "", f"{host}: premature note")
+        check(bool(re.fullmatch(
+            r"Context note \(delegation guard\): 2 consecutive single read-type tool calls in the main loop with no spawn in between\. Delegate a multi-step investigation to sweeper or researcher to keep detailed results out of the main context\. Context is at urgent \(91%\): delegate reads and sweeps\.",
+            ctx(second))), f"{host}: {second.stdout}")
+
+
+def case_46_bad_pressure_is_silent_at_second_read():
+    for kind in ("stale", "other-host", "malformed"):
+        env = Env()
+        path = env.pressure("urgent", 91, host="codex" if kind == "other-host" else "claude",
+                            ts=time.time() - 601 if kind == "stale" else None)
+        if kind == "malformed":
+            path.write_text("{broken")
+        result = drive(env, 2)[-1]
+        check(result.stdout == "", f"{kind}: unexpected note {result.stdout}")
+
+
+def case_47_installed_context_guard_writes_no_bytecode():
+    env = Env()
+    installed = env.tmp / "installed"
+    installed.mkdir()
+    for source in SCRIPT.parent.glob("*.py"):
+        shutil.copy2(source, installed / source.name)
+    vars = env.env(T0)
+    vars.pop("PYTHONDONTWRITEBYTECODE", None)
+    result = subprocess.run([sys.executable, str(installed / "context_guard.py")],
+                            input=json.dumps(bash_ev(env)), capture_output=True, text=True,
+                            env=vars, timeout=20)
+    check(result.returncode == 0 and result.stdout == "", f"installed hook: {result.stderr}")
+    check(not list(installed.rglob("*.pyc")) and not list(installed.rglob("__pycache__")),
+          "installed hook wrote bytecode")
 
 
 def main():

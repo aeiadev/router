@@ -52,6 +52,11 @@ def tree_snapshot(path):
             for item in path.rglob("*") if item.is_file()}
 
 
+def installed_files_snapshot(path):
+    return {name: data for name, data in tree_snapshot(path).items()
+            if name != "router/install-manifest.json"}
+
+
 def router_hook(config):
     blocks = [block for block in config["hooks"]["PreToolUse"]
               if any("codex_spawn_guard.py" in hook.get("command", "") for hook in block["hooks"])]
@@ -129,9 +134,9 @@ try:
         check("developer_instructions" in contents and all(field in contents for field in ("TASK", "FILES", "BAR", "RETURN")),
               f"missing brief instructions for {role}")
     assert_routing(codex, dict(os.environ))
-    before = tree_snapshot(codex)
+    before = installed_files_snapshot(codex)
     install()
-    check(tree_snapshot(codex) == before, "Codex reinstall changed files or duplicated hooks")
+    check(installed_files_snapshot(codex) == before, "Codex reinstall changed files or duplicated hooks")
 
     hooks_file = codex / "hooks.json"
     config = json.loads(hooks_file.read_text())
@@ -178,8 +183,25 @@ try:
     assert_routing(custom, dict(os.environ))
     install("--uninstall", environment=custom_env)
     check(json.loads((custom / "hooks.json").read_text()) == original, "Codex custom uninstall removed user settings")
+
+    # --purge alone removes backups and nothing else; with --uninstall it runs after the uninstall.
+    purge_home = home / "purge home"
+    purge_home.mkdir()
+    (purge_home / "hooks.json").write_text(json.dumps(original))
+    purge_env = dict(os.environ, CODEX_HOME=str(purge_home), ROUTER_STATE=str(home / "purge-state"))
+    install(environment=purge_env)
+    backups = list(purge_home.glob("hooks.json.router-backup-*"))
+    check(len(backups) == 1 and backups[0].stat().st_mode & 0o777 == 0o600, "Codex install backup missing or not 0600")
+    kept = {name: data for name, data in tree_snapshot(purge_home).items() if ".router-backup-" not in name}
+    purged = install("--purge", environment=purge_env)
+    check(f"Removed backup: {backups[0]}" in purged.stdout, "Codex --purge did not list the backup")
+    check(not list(purge_home.glob("*.router-backup-*")), "Codex --purge left a backup")
+    check(tree_snapshot(purge_home) == kept, "Codex --purge changed the installation")
+    install("--uninstall", "--purge", environment=purge_env)
+    check(not list(purge_home.glob("*.router-backup-*")), "Codex uninstall --purge left a backup")
+    check(json.loads((purge_home / "hooks.json").read_text()) == original, "Codex uninstall --purge lost user settings")
 except (AssertionError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
     sys.exit(f"fresh-user-codex: FAIL: {exc}")
 
-print("fresh-user-codex: PASS (install, role pins, routing, shared switch, merge, backup, custom paths, uninstall)")
+print("fresh-user-codex: PASS (install, role pins, routing, shared switch, merge, backup, custom paths, uninstall, purge)")
 PY

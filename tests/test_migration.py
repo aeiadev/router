@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Role migration and sibling install contract regressions, entirely offline."""
 import hashlib
+import re
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ import test_codex
 import test_install
 
 BRIEF = test_spawn.BRIEF
+TIMEOUT = test_spawn.TIMEOUT
 RENAMES = {"seat-exec": "builder", "seat-exec-here": "builder-in-place",
            "seat-judge": "judge", "seat-sweep": "sweeper", "general-purpose": "worker",
            "Explore": "researcher", "Plan": "planner"}
@@ -30,6 +32,74 @@ for old, new in list(RENAMES.items())[:4]:
 for old, new in (("explore", "researcher"), ("plan", "planner"), ("worker", "worker")):
     for tier in ("std", "up"):
         ALIASES[old + "-" + tier] = new + "-" + tier
+
+
+NINE = ("builder", "builder-in-place", "test-writer", "docs-writer", "worker", "judge",
+        "sweeper", "researcher", "planner")
+READ_SET = {"sweeper", "researcher", "planner"}
+CODEX_NOTE_ROLES = {"judge", "sweeper", "researcher", "planner", "test-writer"}
+FULL_SENTENCE = 'Before any work, check the brief has exactly one nonempty TASK, FILES, BAR, and RETURN, in that order. A field is a line starting with its name in capitals followed by a colon or a space, or its name in any case followed by a colon. If any field is missing, duplicated, empty, or out of order, return NOT DONE naming the problem and do nothing else.'
+READ_SENTENCE = 'Before any work, check the brief has exactly one nonempty TASK and RETURN. FILES and BAR are optional, at most once each. Fields keep the order TASK, FILES, BAR, RETURN. A field is a line starting with its name in capitals followed by a colon or a space, or its name in any case followed by a colon. If the brief breaks this, return NOT DONE naming the problem and do nothing else.'
+OLD_BODY_BYTES = {"builder-in-place": 2024, "builder": 1984, "docs-writer": 1601, "judge": 3624,
+                  "planner": 1855, "researcher": 1863, "sweeper": 1784, "test-writer": 2048,
+                  "worker": 1621}
+
+
+def split_role(path):
+    match = re.fullmatch(r"---\n(.*?)\n---\n(.*)", Path(path).read_text(encoding="utf-8"), re.DOTALL)
+    return dict(line.split(": ", 1) for line in match[1].splitlines()), match[2]
+
+
+class RoleContract(unittest.TestCase):
+    def test_each_role_carries_its_c1_sentence_exactly(self):
+        for role in NINE:
+            with self.subTest(role=role):
+                body = split_role(ROOT / f"agents/{role}.md")[1]
+                paragraph = body.split("## Job", 1)[1].strip().split("\n\n", 1)[0]
+                self.assertEqual(paragraph, READ_SENTENCE if role in READ_SET else FULL_SENTENCE)
+                self.assertNotIn("Free-text notes may follow", body)
+
+    def test_codex_text_lives_only_in_tomls(self):
+        for path in sorted((ROOT / "agents").glob("*.md")):
+            self.assertNotIn("Codex", path.read_text(encoding="utf-8"), path.name)
+        for path in sorted((ROOT / "codex/agents").glob("*.toml")):
+            base = re.sub(r"-(light|std|up)$", "", path.stem)
+            has = "Codex" in path.read_text(encoding="utf-8")
+            self.assertEqual(has, base in CODEX_NOTE_ROLES, path.name)
+
+    def test_judge_return_wording(self):
+        body = split_role(ROOT / "agents/judge.md")[1].split("## Return", 1)[1]
+        for token in ("PASS", "SEND_BACK", "NOT DONE"):
+            self.assertIn(token, body.split("Then", 1)[0], token)
+        self.assertIn("numbered findings", body)
+        self.assertIn('one per line starting "1."', body)
+        self.assertIn("REPRODUCED or REASONED", body)
+        self.assertIn("follow the verdict line, never precede it", body)
+
+    def test_toml_pins_are_verified_and_repinnable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            copy = Path(temporary)
+            for folder in ("agents", "codex", "scripts", "hooks"):
+                shutil.copytree(ROOT / folder, copy / folder)
+            pins = copy / "agents/SHARED.sha256"
+            original = pins.read_text()
+            row = next(line for line in original.splitlines() if line.endswith("judge.toml"))
+            pins.write_text(original.replace(row, "0" * 64 + row[64:]))
+            script = str(copy / "scripts/generate_roles.py")
+            result = subprocess.run([sys.executable, script, "--check"], capture_output=True, text=True, timeout=TIMEOUT)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("judge.toml", result.stderr)
+            result = subprocess.run([sys.executable, script, "--pin"], capture_output=True, text=True, timeout=TIMEOUT)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(pins.read_text(), original)
+
+    def test_description_and_body_budgets(self):
+        total = 0
+        for role in NINE:
+            fields, body = split_role(ROOT / f"agents/{role}.md")
+            total += len(role.encode()) + len(fields["description"].encode())
+            self.assertLessEqual(len(body.encode()), OLD_BODY_BYTES[role] + 150, role)
+        self.assertLessEqual(total, 1300, "name+description bytes over the C8 ceiling")
 
 
 class SharedRoles(unittest.TestCase):
@@ -72,7 +142,7 @@ class SharedRoles(unittest.TestCase):
                 original = path.read_bytes()
                 path.write_bytes(original + b"drift\n")
                 result = subprocess.run([sys.executable, str(copy / "scripts/generate_roles.py"), "--check"],
-                                        capture_output=True, text=True, timeout=15)
+                                        capture_output=True, text=True, timeout=TIMEOUT)
                 self.assertNotEqual(result.returncode, 0, name)
                 self.assertIn("drift", result.stderr.lower())
                 path.write_bytes(original)
@@ -81,12 +151,16 @@ class SharedRoles(unittest.TestCase):
         checksum = ROOT / "agents/SHARED.sha256"
         self.assertTrue(checksum.is_file(), "shared checksum manifest missing")
         rows = checksum.read_text().splitlines()
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), 19)
+        names = set()
         for row in rows:
             digest, name = row.split()
+            names.add(name)
             self.assertEqual(hashlib.sha256((ROOT / "agents" / name).read_bytes()).hexdigest(), digest)
+        self.assertEqual(names, {f"{r}.md" for r in NINE} | {f"../codex/agents/{r}.toml" for r in NINE} | {"../scripts/budget.py"},
+                         "pins must list exactly the nine .md, nine .toml shared roles and scripts/budget.py")
         result = subprocess.run([sys.executable, str(ROOT / "scripts/generate_roles.py"), "--check"],
-                                text=True, capture_output=True, timeout=15)
+                                text=True, capture_output=True, timeout=TIMEOUT)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_docs_name_migration(self):
@@ -126,6 +200,12 @@ class ClaudeAliases(test_spawn.SpawnTests):
 
 
 class CodexAliases(test_codex.CodexSpawnTests):
+    def setUp(self):
+        super().setUp()
+        self.environment.update(HOME=str(self.root / "home"),
+                                XDG_CONFIG_HOME=str(self.root / "config"), ROUTER_LOCAL="off")
+        self.assertTrue(all(name in self.environment for name in ("HOME", "XDG_CONFIG_HOME", "ROUTER_LOCAL")))
+
     def test_every_alias_matches_installed_canonical_policy(self):
         agents = Path(self.environment["CODEX_HOME"]) / "agents"
         agents.mkdir(parents=True)
@@ -235,7 +315,7 @@ class Mutations(unittest.TestCase):
                 self.assertEqual(text.count(old), 1, "mutation site must be unique")
                 path.write_text(text.replace(old, new))
                 result = subprocess.run([sys.executable, str(copy / "tests/test_migration.py"), case],
-                                        text=True, capture_output=True, timeout=45)
+                                        text=True, capture_output=True, timeout=TIMEOUT)
                 self.assertNotEqual(result.returncode, 0, "mutation escaped the regression suite")
                 self.assertIn("FAIL:", result.stderr, result.stderr)
 
@@ -243,7 +323,7 @@ class Mutations(unittest.TestCase):
 def load_tests(loader, tests, pattern):
     # Reuse setup/assertion helpers without repeating their entire parent suites.
     suite = unittest.TestSuite()
-    for cls in (SharedRoles, ClaudeAliases, CodexAliases, Sharing, Mutations):
+    for cls in (RoleContract, SharedRoles, ClaudeAliases, CodexAliases, Sharing, Mutations):
         for name in cls.__dict__:
             if name.startswith("test_"):
                 suite.addTest(cls(name))

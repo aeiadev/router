@@ -1,0 +1,79 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/spawn_guard.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|Bash|Edit|Write|SubagentHandback",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/context_guard.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/context_guard.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/context_guard.py\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/session_note.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/judge_reminder.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/prompt_hint.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

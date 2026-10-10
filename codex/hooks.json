@@ -20,6 +20,17 @@
         ]
       }
     ],
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/session_note.py\""
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": ".*",

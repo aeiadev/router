@@ -1,0 +1,132 @@
+# Project state
+
+## Next move
+Wire the report command into the nightly job and check the totals by hand.
+
+## Objective
+Ship the ledger report with per-lane totals that match the raw table exactly.
+
+## In flight
+Reviewing the totals query; the join on session drops rows with a null label.
+
+## Notes
+- Note 001: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 002: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 003: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 004: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 005: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 006: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 007: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 008: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 009: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 010: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 011: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 012: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 013: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 014: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 015: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 016: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 017: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 018: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 019: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 020: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 021: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 022: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 023: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 024: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 025: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 026: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 027: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 028: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 029: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 030: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 031: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 032: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 033: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 034: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 035: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 036: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 037: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 038: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 039: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 040: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 041: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 042: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 043: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 044: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 045: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 046: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 047: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 048: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 049: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 050: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 051: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 052: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 053: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 054: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 055: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 056: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 057: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 058: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 059: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 060: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 061: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 062: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 063: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 064: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 065: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 066: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 067: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 068: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 069: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 070: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 071: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 072: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 073: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 074: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 075: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 076: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 077: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 078: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 079: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 080: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 081: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 082: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 083: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 084: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 085: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 086: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 087: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 088: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 089: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 090: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 091: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 092: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 093: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 094: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 095: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 096: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 097: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 098: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 099: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 100: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 101: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 102: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 103: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 104: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 105: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 106: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 107: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 108: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 109: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 110: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 111: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 112: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 113: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 114: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 115: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 116: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 117: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 118: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 119: the parser keeps field order stable when a brief repeats a keyword in prose.
+- Note 120: the parser keeps field order stable when a brief repeats a keyword in prose.

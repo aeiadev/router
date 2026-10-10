@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Standalone routing regressions. All hook state lives in temporary directories."""
+import contextlib
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -20,6 +23,7 @@ import spawn_guard
 GUARD = ROUTER / "spawn_guard.py"
 ROUTES = json.loads((ROUTER / "routes.json").read_text(encoding="utf-8"))
 BRIEF = "TASK add a text helper\nFILES src/text.py\nBAR run unit tests\nRETURN five lines"
+TIMEOUT = 60
 
 
 class SpawnTests(unittest.TestCase):
@@ -31,20 +35,29 @@ class SpawnTests(unittest.TestCase):
         self.switch = self.root / "OFF"
         self.routes_path = self.root / "routes.json"
         self.routes_path.write_text(json.dumps(ROUTES), encoding="utf-8")
-        self.environment = {key: value for key, value in os.environ.items()
-                            if not key.startswith("ROUTER_") and key != "ROUTES_JSON"}
-        self.environment.update({
+        (self.root / "routes.local.json").write_text("{}", encoding="utf-8")
+        self.environment = self.hook_environment(os.environ)
+        isolated = patch.dict(os.environ, self.environment, clear=True)
+        isolated.start()
+        self.addCleanup(isolated.stop)
+
+    def hook_environment(self, outer):
+        """The caller's environment with every Router input pinned inside self.root."""
+        environment = {key: value for key, value in outer.items()
+                       if not key.startswith("ROUTER_") and key != "ROUTES_JSON"}
+        environment.update({
+            "HOME": str(self.root / "home"),
             "CLAUDE_HOME": str(self.root / "claude"),
             "ROUTER_HOME": str(self.root / "config"),
             "ROUTER_STATE": str(self.state),
             "ROUTER_OFF_FILE": str(self.switch),
             "ROUTES_JSON": str(self.routes_path),
             "XDG_STATE_HOME": str(self.root / "xdg-state"),
+            "XDG_CONFIG_HOME": str(self.root / "xdg-config"),  # no caller routes.local.json overlay
+            "ROUTER_LOCAL": str(self.root / "routes.local.json"),
             "PYTHONDONTWRITEBYTECODE": "1",
         })
-        isolated = patch.dict(os.environ, self.environment, clear=True)
-        isolated.start()
-        self.addCleanup(isolated.stop)
+        return environment
 
     def run_hook(self, tool_input=None, *, raw=None, tool="Agent", extra=None, event_fields=None):
         if raw is None:
@@ -55,7 +68,7 @@ class SpawnTests(unittest.TestCase):
             raw = json.dumps(event)
         environment = dict(self.environment, **(extra or {}))
         return subprocess.run([sys.executable, str(GUARD)], input=raw,
-                              text=True, capture_output=True, timeout=20,
+                              text=True, capture_output=True, timeout=TIMEOUT,
                               cwd=self.root, env=environment)
 
     @staticmethod
@@ -72,7 +85,12 @@ class SpawnTests(unittest.TestCase):
         return specific["updatedInput"]
 
     def assert_blocked(self, result, *message_parts):
-        self.assertEqual(result.returncode, 2, result.stderr)
+        details = [f"stderr={result.stderr!r}"]
+        if result.returncode != 2:
+            for name in ("errors.jsonl", "spawns.jsonl"):
+                path = self.state / name
+                details.append(f"{name}=" + (path.read_text() if path.exists() else "<absent>"))
+        self.assertEqual(result.returncode, 2, "\n".join(details))
         self.assertEqual(result.stdout, "")
         for part in message_parts:
             self.assertIn(part, result.stderr)
@@ -107,7 +125,9 @@ class SpawnTests(unittest.TestCase):
         for base, levels in ROUTES["tiers"].items():
             for tier, spec in levels.items():
                 with self.subTest(base=base, tier=tier):
-                    prompt = f"Find the relevant files for {spec['agent']}."
+                    prompt = (BRIEF.replace("add a text helper", f"add a text helper for {spec['agent']}")
+                              if ROUTES["router"]["types"][base]["class"] not in ("sweep", "research")
+                              else f"TASK Find the relevant files for {spec['agent']}.\nRETURN file paths")
                     ti = self.input(prompt, spec["agent"])
                     if tier == "up":
                         # Exec up tiers require two accepted rounds for this brief.
@@ -128,7 +148,8 @@ class SpawnTests(unittest.TestCase):
                     "judge": "opus", "researcher": "sonnet", "planner": "sonnet", "worker": "sonnet"}
         for agent, model in expected.items():
             with self.subTest(agent=agent):
-                ti = self.input("Find the relevant files.", agent)
+                ti = self.input(BRIEF if agent not in ("sweeper", "researcher", "planner") else
+                                "TASK Find the relevant files.\nRETURN file paths", agent)
                 self.assertEqual(self.updated(self.run_hook(ti))["model"], model)
 
     def test_judge_is_opus_and_fresh_for_every_tier(self):
@@ -141,7 +162,7 @@ class SpawnTests(unittest.TestCase):
                     self.assertNotIn("resume", got, "judge must review in a fresh context")
 
     def test_exec_requires_its_own_worktree_and_preserves_other_fields(self):
-        ti = self.input("Implement the helper.", isolation="shared",
+        ti = self.input(BRIEF, isolation="shared",
                         run_in_background=True, name="helper", max_turns=8)
         updated = self.updated(self.run_hook(ti))
         self.assertEqual(updated, dict(ti, subagent_type="builder-std",
@@ -176,6 +197,9 @@ class SpawnTests(unittest.TestCase):
                     self.assertIn("owner", result["message"])
 
     def test_unstructured_prompt_persists_all_ladder_rounds(self):
+        routes = copy.deepcopy(ROUTES)
+        routes["router"]["modes"]["brief"] = "off"  # "fix it" is unstructured, so the brief check would deny it
+        self.routes_path.write_text(json.dumps(routes), encoding="utf-8")
         prompt = "fix it"
         self.assertEqual(self.updated(self.run_hook(self.input("route: up ladder\n" + prompt)))["model"], "sonnet")
         self.assertEqual(self.updated(self.run_hook(self.input(" fix  it \n")))["model"], "sonnet")
@@ -184,13 +208,30 @@ class SpawnTests(unittest.TestCase):
         self.assert_blocked(self.run_hook(self.input(prompt + "\nroute: up ladder")), "planning", "owner")
 
     def test_lowercase_task_persists_all_ladder_rounds(self):
-        prompt = "task: fix it\nfiles: src/helper.py"
+        prompt = "task: fix it\nfiles: src/helper.py\nbar: run tests\nreturn: five lines"
         self.assertEqual(self.updated(self.run_hook(self.input("route: up ladder\n" + prompt)))["model"], "sonnet")
-        uppercase = "TASK: fix it\nFILES: src/helper.py"
+        uppercase = "TASK: fix it\nFILES: src/helper.py\nBAR: run tests\nRETURN: five lines"
         self.assertEqual(self.updated(self.run_hook(self.input(uppercase)))["model"], "sonnet")
         self.assert_blocked(self.run_hook(self.input(prompt)), "Round 3", "route: up ladder")
         self.assertEqual(self.updated(self.run_hook(self.input(prompt + "\nroute: up ladder")))["model"], "opus")
         self.assert_blocked(self.run_hook(self.input(uppercase + "\nroute: up ladder")), "planning", "owner")
+
+    def test_locked_ledger_fail_open_names_connect_error_then_unlocked_blocks(self):
+        self.updated(self.run_hook())
+        self.updated(self.run_hook())
+        blocker = sqlite3.connect(self.state / "ledger.sqlite3", isolation_level=None)
+        blocker.execute("BEGIN EXCLUSIVE")
+        try:
+            allowed = self.run_hook()
+            self.assert_unchanged(allowed)
+            errors = (self.state / "errors.jsonl").read_text()
+            self.assertIn('"action":"connect"', errors)
+            self.assertIn(str(self.state / "ledger.sqlite3"), errors)
+            self.assertIn("locked", errors)
+        finally:
+            blocker.execute("ROLLBACK")
+            blocker.close()
+        self.assert_blocked(self.run_hook(), "Round 3")
 
     def test_ladder_rounds_one_to_four(self):
         for round_number in (1, 2):
@@ -202,6 +243,24 @@ class SpawnTests(unittest.TestCase):
         self.assertEqual(got["model"], "opus")
         self.assertEqual(got["subagent_type"], "builder-up")
         self.assert_blocked(self.run_hook(self.input(BRIEF + "\nroute: up ladder")), "planning", "owner")
+
+    def test_callers_routes_overlay_never_reaches_the_hook(self):
+        # A caller whose config holds routes.local.json must not change these ladder results.
+        loose = json.dumps({"router": {"modes": {"ladder": "shadow"}}})
+        caller_home, caller_config = self.root / "caller-home", self.root / "caller-config"
+        for path in (caller_home / ".config/router/routes.local.json",
+                     caller_config / "router/routes.local.json", self.root / "caller-local.json"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(loose, encoding="utf-8")
+        self.environment = self.hook_environment(dict(
+            os.environ, HOME=str(caller_home), XDG_CONFIG_HOME=str(caller_config),
+            ROUTER_LOCAL=str(self.root / "caller-local.json")))
+        for _round in (1, 2):
+            self.assertEqual(self.updated(self.run_hook())["model"], "sonnet")
+        self.assert_blocked(self.run_hook(), "Round 3", "route: up ladder")
+        self.assertEqual(self.updated(self.run_hook(self.input(BRIEF + "\nroute: up ladder")))["model"], "opus")
+        self.assert_blocked(self.run_hook(self.input(BRIEF + "\nroute: up ladder")), "planning", "owner")
+        self.assertFalse((self.state / "errors.jsonl").exists())
 
     def test_ladder_requires_exact_known_escalation_code(self):
         self.updated(self.run_hook())
@@ -272,15 +331,140 @@ class SpawnTests(unittest.TestCase):
             results = list(executor.map(lambda _: self.run_hook(ti), range(8)))
         accepted = [result for result in results if result.returncode == 0]
         rejected = [result for result in results if result.returncode == 2]
-        self.assertEqual(len(accepted), 3, "concurrent submissions bypassed the three-round limit")
+        self.assertEqual(len(accepted), 3, ("concurrent submissions bypassed the three-round limit: " +
+                         (self.state / "errors.jsonl").read_text() if (self.state / "errors.jsonl").exists()
+                         else "concurrent submissions bypassed the three-round limit"))
         self.assertEqual(len(rejected), 5)
         models = sorted(self.updated(result)["model"] for result in accepted)
         self.assertEqual(models, ["opus", "sonnet", "sonnet"])
         for result in rejected:
             self.assert_blocked(result, "planning", "owner")
 
+    def project(self, name):
+        path = self.root / name
+        (path / ".git").mkdir(parents=True)
+        return path
+
+    def ledger_rows(self, sql, *args):
+        with contextlib.closing(sqlite3.connect(self.state / "ledger.sqlite3")) as conn:
+            rows = conn.execute(sql, args).fetchall()
+            conn.commit()
+            return rows
+
+    def age_attempts(self, seconds):
+        self.ledger_rows("UPDATE attempts SET ts = ts - ?", seconds)
+
+    def test_same_brief_in_two_projects_starts_at_round_one_in_each(self):
+        first, second = self.project("first"), self.project("second")
+        for _ in range(2):
+            self.assertEqual(self.updated(self.run_hook(event_fields={"cwd": str(first)}))["model"], "sonnet")
+        self.assert_blocked(self.run_hook(event_fields={"cwd": str(first)}), "Round 3")
+        self.assertEqual(self.updated(self.run_hook(event_fields={"cwd": str(second)}))["model"], "sonnet")
+        rows = self.ledger_rows("SELECT project, round FROM attempts ORDER BY ts")
+        self.assertEqual([row[1] for row in rows], [1, 2, 1])
+        self.assertEqual(len({row[0] for row in rows}), 2, "each project needs its own ladder")
+
+    def test_attempts_older_than_the_ladder_ttl_do_not_count(self):
+        self.updated(self.run_hook())
+        self.updated(self.run_hook())
+        self.age_attempts(13 * 3600)
+        self.assertEqual(self.updated(self.run_hook())["model"], "sonnet")
+        self.assertEqual(self.ledger_rows("SELECT round FROM attempts WHERE round > 0 ORDER BY round"), [(1,)])
+        self.assertEqual(self.ledger_rows("SELECT COUNT(*) FROM attempts WHERE round < 0"), [(2,)],
+                         "expired attempts must stay until the daily prune")
+        # A ladder that spans the TTL: the expired round drops out and numbering stays unique.
+        self.age_attempts(11 * 3600)
+        self.updated(self.run_hook())
+        self.age_attempts(2 * 3600)
+        self.assertEqual(self.updated(self.run_hook())["model"], "sonnet")
+        self.assertEqual(self.ledger_rows("SELECT round FROM attempts WHERE round > 0 ORDER BY round"), [(1,), (2,)])
+        self.assertEqual(self.ledger_rows("SELECT COUNT(*) FROM attempts WHERE round < 0"), [(3,)])
+        self.assert_blocked(self.run_hook(), "Round 3")
+
+    def test_ladder_ttl_hours_comes_from_the_route_table(self):
+        routes = copy.deepcopy(ROUTES)
+        routes["router"]["ladder_ttl_hours"] = 1
+        self.routes_path.write_text(json.dumps(routes), encoding="utf-8")
+        self.updated(self.run_hook())
+        self.updated(self.run_hook())
+        self.age_attempts(2 * 3600)
+        self.assertEqual(self.updated(self.run_hook())["model"], "sonnet")
+        self.updated(self.run_hook())
+        self.assert_blocked(self.run_hook(), "Round 3")
+
+    def test_worktree_under_the_project_root_keeps_the_ladder(self):
+        root = self.project("repo")
+        (root / ".git/worktrees/lane").mkdir(parents=True)
+        (root / ".git/worktrees/lane/commondir").write_text("../..\n", encoding="utf-8")
+        worktree = root / ".claude/worktrees/lane"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {root / '.git/worktrees/lane'}\n", encoding="utf-8")
+        (root / "src").mkdir()
+        self.updated(self.run_hook(event_fields={"cwd": str(root)}))
+        self.updated(self.run_hook(event_fields={"cwd": str(worktree)}))
+        self.assert_blocked(self.run_hook(event_fields={"cwd": str(root / "src")}), "Round 3")
+
+    def lanes(self):
+        return self.ledger_rows("SELECT session, brief, key, project, role, tier, label, status, started, ended"
+                                " FROM lanes ORDER BY started")
+
+    def test_each_accepted_spawn_writes_one_running_lane_and_a_denial_writes_none(self):
+        session = {"session_id": "session-one"}
+        for agent in ("sweeper", "judge", "researcher", "planner", "worker"):
+            self.updated(self.run_hook(self.input(agent=agent), event_fields=session))
+        self.assertFalse((self.state / "ledger.sqlite3").exists(), "non-exec spawns must not open the ledger")
+        self.updated(self.run_hook(event_fields=session))
+        self.updated(self.run_hook(event_fields=session))
+        self.assert_blocked(self.run_hook(event_fields=session), "Round 3")
+        self.assertEqual(len(self.lanes()), 2, "a denial writes no lane")
+        ladder = self.input(BRIEF + "\nroute: up ladder")
+        self.assertEqual(self.updated(self.run_hook(ladder, event_fields=session))["model"], "opus")
+        self.assert_blocked(self.run_hook(ladder, event_fields=session), "owner")
+        lanes = self.lanes()
+        attempts = self.ledger_rows("SELECT key, round, tier, role, project, session, ts FROM attempts ORDER BY round")
+        self.assertEqual(len(lanes), 3, "one lane per accepted spawn, none for a denial")
+        self.assertEqual([attempt[1:4] for attempt in attempts], [(1, "std", "builder"), (2, "std", "builder"),
+                                                                  (3, "up", "builder")])
+        expected_session = hashlib.sha256(b"session-one").hexdigest()[:16]
+        for lane, attempt in zip(lanes, attempts):
+            self.assertEqual(lane[0], expected_session)
+            self.assertRegex(lane[1], r"^[0-9a-f]{16}$")
+            self.assertEqual(lane[2:6], (attempt[0], attempt[4], attempt[3], attempt[2]))
+            self.assertEqual(lane[6:8], ("Implement the helper", "running"))
+            self.assertEqual((lane[8], lane[9]), (attempt[6], None))
+            self.assertEqual(attempt[5], expected_session)
+
+    def test_two_briefs_in_one_session_make_two_lanes(self):
+        session = {"session_id": "session-one"}
+        self.updated(self.run_hook(event_fields=session))
+        self.updated(self.run_hook(self.input(BRIEF.replace("src/text.py", "src/number.py")), event_fields=session))
+        lanes = self.lanes()
+        self.assertEqual(len(lanes), 2)
+        self.assertEqual(len({lane[0] for lane in lanes}), 1)
+        self.assertEqual(len({lane[1] for lane in lanes}), 2, "each brief needs its own lane")
+        self.assertEqual(len({lane[2] for lane in lanes}), 2)
+
+    def test_lane_labels_are_scrubbed_and_can_be_switched_off(self):
+        home = os.environ.get("HOME", "")
+        description = f"  {home}/repo/fix\nthe\tparser\x00 " + "x" * 80
+        ti = self.input()
+        ti["description"] = description
+        self.updated(self.run_hook(ti, event_fields={"session_id": "s"}))
+        label = self.lanes()[0][6]
+        self.assertTrue(label.startswith("~/repo/fix the parser x"), label)
+        self.assertEqual(len(label), 60)
+        ti = self.input(BRIEF.replace("text", "list"))
+        ti["description"] = ["not", "text"]
+        self.updated(self.run_hook(ti, event_fields={"session_id": "s"}))
+        self.assertIsNone(self.lanes()[1][6], "a non-string description has no label")
+        routes = copy.deepcopy(ROUTES)
+        routes["router"]["lane_labels"] = False
+        self.routes_path.write_text(json.dumps(routes), encoding="utf-8")
+        self.updated(self.run_hook(self.input(BRIEF.replace("text", "date")), event_fields={"session_id": "s"}))
+        self.assertIsNone(self.lanes()[2][6], "router.lane_labels false stores no label")
+
     def test_unknown_up_code_is_ignored(self):
-        ti = self.input("Find the relevant files.\nroute: up unknown", "sweeper")
+        ti = self.input("TASK Find the relevant files.\nRETURN file paths\nroute: up unknown", "sweeper")
         got = self.updated(self.run_hook(ti))
         self.assertEqual(got["subagent_type"], "sweeper-light")
         self.assertEqual(got["model"], "haiku")
@@ -353,14 +537,35 @@ class SpawnTests(unittest.TestCase):
         self.assert_blocked(self.run_hook(tool="Task"), "Round 3")
 
     def test_logs_do_not_store_prompt_or_description(self):
+        # C3 stores the scrubbed description as the lane label, and only there; with
+        # router.lane_labels false nothing of the description is stored at all.
         marker = "PRIVATE_PROMPT_CONTENT_MUST_NOT_BE_STORED"
-        ti = self.input(BRIEF + "\n" + marker)
-        ti["description"] = marker
-        self.updated(self.run_hook(ti))
-        paths = [path for path in self.state.rglob("*") if path.is_file()]
-        self.assertTrue(paths, "test needs actual state writes")
-        for path in paths:
-            self.assertNotIn(marker.encode(), path.read_bytes(), str(path))
+        label = "PRIVATE_DESCRIPTION_ONLY_IN_THE_LANE_LABEL"
+        routes = copy.deepcopy(ROUTES)
+        for labels in (True, False):
+            with self.subTest(lane_labels=labels):
+                routes["router"]["lane_labels"] = labels
+                self.routes_path.write_text(json.dumps(routes), encoding="utf-8")
+                ti = self.input(BRIEF + "\n" + marker)
+                ti["description"] = label
+                self.updated(self.run_hook(ti))
+                paths = [path for path in self.state.rglob("*") if path.is_file()]
+                self.assertTrue(paths, "test needs actual state writes")
+                for path in paths:
+                    self.assertNotIn(marker.encode(), path.read_bytes(), str(path))
+                    if path.name != "ledger.sqlite3" or not labels:
+                        self.assertNotIn(label.encode(), path.read_bytes(), str(path))
+                stored = [row[0] for row in self.ledger_rows("SELECT label FROM lanes")]
+                self.assertEqual(stored, [label] if labels else [None])
+                with contextlib.closing(sqlite3.connect(self.state / "ledger.sqlite3")) as conn:
+                    for table in ("attempts", "lanes", "verdicts"):
+                        names = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+                        for row in conn.execute(f"SELECT * FROM {table}"):
+                            for name, cell in zip(names, row):
+                                if table == "lanes" and name == "label":
+                                    continue
+                                self.assertNotIn(label, str(cell), f"label leaked into {table}.{name}")
+                (self.state / "ledger.sqlite3").unlink()
 
 
 if __name__ == "__main__":

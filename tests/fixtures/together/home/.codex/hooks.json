@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "shell",
+        "hooks": [{"type": "command", "command": "echo user-post-shell"}]
+      }
+    ],
+    "Stop": []
+  }
+}

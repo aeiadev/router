@@ -1,0 +1,1 @@
+{"context":{"caps":{"exec":800,"judge":800,"research":2500,"sweep":1500,"worker":2500},"chain":{"first":4,"repeat":8},"large_read_bytes":12000,"modes":{"large_read":"enforce","stop_cap_research":"enforce"}}}

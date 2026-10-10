@@ -3,11 +3,13 @@
 import ast
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,7 +48,9 @@ class CommonTests(unittest.TestCase):
                           ROUTER_HOME=str(self.tmp / "router"),
                           ROUTER_STATE=str(self.tmp / "state"),
                           ROUTER_OFF_FILE=str(self.tmp / "OFF"),
-                          ROUTES_JSON=str(ROUTES), PYTHONDONTWRITEBYTECODE="1")
+                          ROUTES_JSON=str(ROUTES), PYTHONDONTWRITEBYTECODE="1",
+                          XDG_CONFIG_HOME=str(self.tmp / "config"), ROUTER_LOCAL="off")
+        self.assertTrue(all(name in os.environ for name in ("HOME", "XDG_CONFIG_HOME", "ROUTER_LOCAL")))
         self.common = import_common()
         self.routes = self.common.load_routes()
         self.state = self.tmp / "state"
@@ -61,6 +65,78 @@ class CommonTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-B", str(CLI), command],
                               env=os.environ.copy(), stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=10)
+
+    def run_cli(self, *args, cli=CLI, env=None):
+        return subprocess.run([sys.executable, "-B", str(cli), *args], env=env or os.environ.copy(),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+
+    def package_copy(self, name):
+        """A throwaway copy of the package: bin/router plus hooks/router."""
+        top = self.tmp / name
+        (top / "bin").mkdir(parents=True)
+        shutil.copy2(CLI, top / "bin/router")
+        shutil.copytree(ROOT / "hooks/router", top / "hooks/router",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        return top
+
+    def test_cli_discovers_command_files_beside_common(self):
+        top = self.package_copy("package")
+        (top / "hooks/router/cmd_x.py").write_text(
+            'HELP = "throwaway test command"\n\n\ndef main(argv):\n'
+            '    print("x ran", argv)\n    return 3\n', encoding="utf-8")
+        ran = self.run_cli("x", "first", "--second", cli=top / "bin/router")
+        self.assertEqual((ran.returncode, ran.stdout, ran.stderr), (3, "x ran ['first', '--second']\n", ""))
+        unknown = self.run_cli("nosuch", cli=top / "bin/router")
+        self.assertEqual(unknown.returncode, 2)
+        self.assertIn("unknown command 'nosuch'", unknown.stderr)
+        for name in ("on", "off", "status", "auto", "ladder", "x", "throwaway test command"):
+            self.assertIn(name, unknown.stderr)
+        self.assertIn("throwaway test command", self.run_cli("--help", cli=top / "bin/router").stdout)
+        self.assertEqual(self.run_cli("status", cli=top / "bin/router").returncode, 0, "built-ins still run")
+        self.assertNotIn("x", self.run_cli("nosuch").stderr.split(), "the throwaway file stays in its copy")
+        # Installed CLIs may find the package through ROUTER_HOME, whose common.py is a symlink.
+        home = self.tmp / "installed"
+        (home / "router").mkdir(parents=True)
+        shutil.copytree(top / "hooks", home / "hooks")
+        (home / "router/common.py").symlink_to("../hooks/router/common.py")
+        (home / "router/routes.json").symlink_to("../hooks/router/routes.json")
+        alone = self.tmp / "alone/bin/router"
+        alone.parent.mkdir(parents=True)
+        shutil.copy2(CLI, alone)
+        linked = self.run_cli("x", cli=alone, env=dict(os.environ, ROUTER_HOME=str(home / "router")))
+        self.assertEqual((linked.returncode, linked.stdout), (3, "x ran []\n"), linked.stderr)
+
+    def test_router_ladder_lists_and_resets_a_spawned_ladder(self):
+        project = self.tmp / "project"
+        (project / ".git").mkdir(parents=True)
+        prompt = "TASK add a helper\nFILES src/a.py\nBAR tests\nRETURN five lines"
+        event = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "cwd": str(project), "session_id": "s",
+                 "tool_input": {"subagent_type": "builder", "prompt": prompt, "description": "helper"}}
+        spawn = subprocess.run([sys.executable, "-B", str(ROOT / "hooks/router/spawn_guard.py")],
+                               input=json.dumps(event), env=os.environ.copy(), text=True,
+                               capture_output=True, timeout=20)
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+        key = self.common.claude_key(self.common.project_key(str(project)), self.common.brief_hash(prompt))
+        listed = self.run_cli("ladder", "list")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        rows = [line.split() for line in listed.stdout.splitlines()]
+        self.assertEqual(rows[0], ["key", "round", "tier", "age"])
+        self.assertEqual(rows[1][:3], [key, "1/3", "std"])
+        self.assertRegex(rows[1][3], r"^\d+m$")
+        reset = self.run_cli("ladder", "reset", key)
+        self.assertEqual(reset.returncode, 0, reset.stderr)
+        self.assertIn(key, reset.stdout)
+        self.assertNotIn(key, self.run_cli("ladder", "list").stdout)
+        again = self.run_cli("ladder", "reset", key)
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("no attempts", again.stderr)
+        self.assertEqual(self.run_cli("ladder").returncode, 2, "a missing ladder action is a usage error")
+
+    def test_router_ladder_list_needs_no_ledger_and_creates_none(self):
+        listed = self.run_cli("ladder", "list")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("no live ladders", listed.stdout)
+        self.assertFalse((self.state / "ledger.sqlite3").exists())
 
     def test_import_has_no_state_side_effects_and_stdlib_only(self):
         self.assertFalse(self.state.exists(), "import created state")
@@ -269,8 +345,145 @@ class CommonTests(unittest.TestCase):
         first = "TASK: Fix parser\nFILES: src/a.py\nBAR tests"
         second = " task:  Fix  parser\n files: src/a.py\nBAR another check\nroute: up ladder"
         self.assertEqual(self.common.brief_hash(first), self.common.brief_hash(second))
-        self.assertEqual(self.common.brief_lines(second)["task"], "task:  Fix  parser")
-        self.assertEqual(self.common.brief_lines(second)["files"], "files: src/a.py")
+        fields = dict(self.common.brief_fields(second))
+        self.assertEqual(fields["TASK"], "Fix  parser")
+        self.assertEqual(fields["FILES"], "src/a.py")
+
+    def test_brief_fields_follow_the_c1_field_rule(self):
+        fields = self.common.brief_fields
+        for prompt in ("TASK fix it", "TASK: fix it", "task: fix it", "  Task:fix it", "\tTASK\tfix it"):
+            with self.subTest(field=prompt):
+                self.assertEqual(fields(prompt), [("TASK", "fix it")])
+        for prose in ("Task fix it", "task fix it", "TASKS: fix it", "Files are listed below", "the TASK: x"):
+            with self.subTest(prose=prose):
+                self.assertEqual(fields(prose), [])
+        brief = ("Preamble is no field.\nTASK fix the parser\nkeep the old API\n"
+                 "FILES src/a.py\n  src/b.py\nBAR: run tests\nRETURN five lines\nNotes after RETURN.")
+        self.assertEqual(fields(brief), [("TASK", "fix the parser\nkeep the old API"),
+                                         ("FILES", "src/a.py\n  src/b.py"), ("BAR", "run tests"),
+                                         ("RETURN", "five lines\nNotes after RETURN.")])
+        self.assertEqual(fields("TASK:\n  fix it\nTASK again"), [("TASK", "fix it"), ("TASK", "again")],
+                         "repeats stay visible and a colon field may start on the next line")
+        for value in (None, 7, b"TASK x"):
+            self.assertEqual(fields(value), [])
+
+    def test_brief_hash_hashes_the_first_task_and_files_lines_of_the_fields(self):
+        digest = self.common.brief_hash("TASK fix it\nFILES a.py")
+        for same in ("TASK: fix it\nFILES: a.py", "task: fix it\nfiles: a.py\nBAR other",
+                     "TASK fix it\nmore text\nFILES a.py\nmore files", "TASK:\nfix it\nFILES:   a.py"):
+            with self.subTest(same=same):
+                self.assertEqual(self.common.brief_hash(same), digest)
+        self.assertNotEqual(self.common.brief_hash("Task fix it\nFILES a.py"), digest, "prose is not a TASK field")
+        self.assertEqual(self.common.brief_hash("Task fix it\nFILES a.py"),
+                         self.common.brief_hash("Task  fix it FILES a.py"), "no TASK field hashes the whole prompt")
+
+    def test_project_key_walks_up_to_the_git_root_without_a_subprocess(self):
+        def digest(path):
+            return hashlib.sha256(str(path).encode()).hexdigest()[:12]
+        root = (self.tmp / "repo").resolve()
+        (root / ".git/worktrees/lane").mkdir(parents=True)
+        (root / ".git/worktrees/lane/commondir").write_text("../..\n", encoding="utf-8")
+        deep = root / "src/pkg"
+        deep.mkdir(parents=True)
+        worktree = root / ".claude/worktrees/lane"
+        (worktree / "src").mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {root / '.git/worktrees/lane'}\n", encoding="utf-8")
+        submodule = root / "vendor/sub"
+        submodule.mkdir(parents=True)
+        (submodule / ".git").write_text("gitdir: ../../.git/modules/sub\n", encoding="utf-8")
+        plain = (self.tmp / "plain/dir").resolve()
+        plain.mkdir(parents=True)
+        other = (self.tmp / "other").resolve()
+        (other / ".git").mkdir(parents=True)
+        with patch("subprocess.Popen", side_effect=AssertionError("project_key started a subprocess")):
+            key = self.common.project_key(str(root))
+            self.assertRegex(key, r"^[0-9a-f]{12}$")
+            self.assertEqual(key, digest(root))
+            self.assertEqual(self.common.project_key(str(deep)), key)
+            self.assertEqual(self.common.project_key(str(worktree / "src")), key,
+                             "a worktree under the project root must keep the project key")
+            self.assertEqual(self.common.project_key(str(submodule)), digest(submodule))
+            # No .git up to the filesystem root means the cwd itself (a shared /tmp may hold one).
+            above = next((path for path in plain.parents if (path / ".git").exists()), plain)
+            self.assertEqual(self.common.project_key(str(plain)), digest(above))
+            self.assertNotEqual(self.common.project_key(str(other)), key)
+
+    def test_claude_and_codex_keys_include_the_project(self):
+        common = self.common
+        brief = common.brief_hash("TASK x\nFILES y")
+        first = common.claude_key("aaaaaaaaaaaa", brief)
+        self.assertRegex(first, r"^c:[0-9a-f]{16}$")
+        self.assertNotEqual(first, common.claude_key("bbbbbbbbbbbb", brief))
+        self.assertNotEqual(first, common.claude_key("aaaaaaaaaaaa", common.brief_hash("TASK z\nFILES y")))
+        builder = common.classify("builder-std", self.routes)
+        codex = common.codex_key("aaaaaaaaaaaa", "task", builder)
+        self.assertRegex(codex, r"^x:[0-9a-f]{16}$")
+        self.assertNotEqual(codex, common.codex_key("bbbbbbbbbbbb", "task", builder))
+        self.assertEqual(codex, common.codex_key("aaaaaaaaaaaa", " task ", common.classify("builder-light", self.routes)))
+        self.assertNotEqual(codex, common.codex_key("aaaaaaaaaaaa", "task", common.classify("builder-in-place", self.routes)))
+        for bad in (None, "", "  ", 7):
+            self.assertIsNone(common.codex_key("aaaaaaaaaaaa", bad, builder))
+        self.assertFalse(hasattr(common, "codex_task_hash"), "codex_key replaces codex_task_hash")
+
+    def test_lane_labels_are_scrubbed_per_c3(self):
+        os.environ["HOME"] = "/home/u"  # short and fixed: the 60-character cap must not depend on TMPDIR
+        home = os.environ["HOME"]
+        label = lambda value, routes=self.routes: self.common.lane_label(value, routes)
+        cases = [
+            ("Implement the helper", "Implement the helper"),
+            ("  fix\nthe\r\nparser\tnow\x00\x1b[31m  red ", "fix the parser now [31m red"),
+            ("bidi\u202eflip\u2028line", "bidi flip line"),
+            (home, "~"),
+            (home + "/repo/src", "~/repo/src"),
+            (home + "x/repo", home + "x/repo"),
+            ("see " + home + "/repo", "see " + home + "/repo"),
+            ("a" * 61, "a" * 60),
+            ("\u00e9" * 70, "\u00e9" * 60),
+            ("lone\ud800surrogate", "lone?surrogate"),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                got = label(value)
+                self.assertEqual(got, expected)
+                got.encode("utf-8")
+        for value in (None, 7, ["x"], {"a": 1}, "", " \n\t "):
+            with self.subTest(value=value):
+                self.assertIsNone(label(value))
+        off = copy.deepcopy(self.routes)
+        off["router"]["lane_labels"] = False
+        self.assertIsNone(label("Implement the helper", off))
+        self.assertEqual(self.common.session_hash("abc"), hashlib.sha256(b"abc").hexdigest()[:16])
+        for value in (None, "", 7):
+            self.assertIsNone(self.common.session_hash(value))
+
+    def test_lane_labels_setting_is_validated(self):
+        self.assertIs(self.routes["router"]["lane_labels"], True)
+        changed = copy.deepcopy(self.routes)
+        changed["router"].pop("lane_labels")
+        self.assertEqual(self.common.validate_routes(changed), [])
+        self.assertEqual(self.common.lane_label("x", changed), "x")
+        for bad in (0, 1, "false", None, []):
+            with self.subTest(bad=bad):
+                changed["router"]["lane_labels"] = bad
+                errors = self.common.validate_routes(changed)
+                self.assertTrue(any("lane_labels" in error for error in errors), errors)
+
+    def test_ladder_ttl_hours_is_validated_and_defaults_to_twelve(self):
+        self.assertEqual(self.routes["router"]["ladder_ttl_hours"], 12)
+        self.assertEqual(self.common.ladder_ttl_hours(self.routes), 12)
+        changed = copy.deepcopy(self.routes)
+        changed["router"].pop("ladder_ttl_hours")
+        self.assertEqual(self.common.validate_routes(changed), [])
+        self.assertEqual(self.common.ladder_ttl_hours(changed), 12)
+        for good in (1, 720):
+            changed["router"]["ladder_ttl_hours"] = good
+            self.assertEqual(self.common.validate_routes(changed), [])
+            self.assertEqual(self.common.ladder_ttl_hours(changed), good)
+        for bad in (0, 721, -3, 12.5, "12", True, None):
+            with self.subTest(bad=bad):
+                changed["router"]["ladder_ttl_hours"] = bad
+                errors = self.common.validate_routes(changed)
+                self.assertTrue(any("ladder_ttl_hours" in error for error in errors), errors)
 
     def test_brief_hash_falls_back_to_normalized_prompt_without_routes(self):
         for prompt in ("fix it", "FILES src/a.py", "", "\n\t"):

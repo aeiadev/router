@@ -1,0 +1,15 @@
+{
+  "model": "opus",
+  "permissions": {
+    "allow": ["Bash(ls:*)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [{"type": "command", "command": "echo user-pre-write"}]
+      }
+    ],
+    "Stop": []
+  }
+}

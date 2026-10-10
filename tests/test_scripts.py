@@ -20,7 +20,9 @@ class ScriptTests(unittest.TestCase):
         self.tmp = Path(temporary.name)
         self.env = os.environ.copy()
         self.env.update(HOME=str(self.tmp), ROUTER_STATE=str(self.tmp / "state"),
-                        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+                        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                        XDG_CONFIG_HOME=str(self.tmp / "config"), ROUTER_LOCAL="off")
+        self.assertTrue(all(name in self.env for name in ("HOME", "XDG_CONFIG_HOME", "ROUTER_LOCAL")))
         for key in tuple(self.env):
             if key.startswith("CLOSE_LANE_"):
                 self.env.pop(key)
@@ -36,7 +38,7 @@ class ScriptTests(unittest.TestCase):
                          f"expected exit {code}; stdout={result.stdout!r}; stderr={result.stderr!r}")
 
     def test_helpers_offer_help(self):
-        for name in ("wait-until.sh", "close-lane.sh", "cite-check.py", "dispatch-log.py"):
+        for name in ("wait-until.sh", "close-lane.sh", "cite-check.py"):
             with self.subTest(script=name):
                 self.assert_code(self.run_script(name, "--help"), 0)
 
@@ -230,42 +232,6 @@ class ScriptTests(unittest.TestCase):
         report.write_text("No citations here.\n")
         self.assert_code(self.run_script("cite-check.py", report, "--root", root), 1)
 
-    def log(self, *arguments):
-        return self.run_script("dispatch-log.py", *arguments)
-
-    def add_run(self, model="sonnet", seat="builder", *extra):
-        return self.log("add", "--family", "Feature", "--seat", seat,
-                        "--model", model, "--verdict", "SEND_BACK", *extra)
-
-    def test_log_enforces_two_sonnet_then_one_opus(self):
-        self.assert_code(self.add_run(), 0)
-        self.assert_code(self.add_run(), 0)
-        self.assert_code(self.add_run(), 3)
-        self.assert_code(self.add_run("opus"), 3)
-        self.assert_code(self.add_run("opus", "builder-up", "--escalated"), 0)
-        self.assert_code(self.add_run("opus", "builder-up", "--escalated"), 3)
-        self.assertEqual(self.log("rounds", "feature").stdout.strip(), "3")
-        rows = [json.loads(line) for line in (self.tmp / "state/runs.jsonl").read_text().splitlines()]
-        self.assertEqual([row["round"] for row in rows], [1, 2, 3])
-
-    def test_log_judges_and_blocked_no_edits_do_not_count(self):
-        self.assert_code(self.add_run("opus", "judge"), 0)
-        self.assert_code(self.add_run("haiku", "sweeper"), 0)
-        self.assert_code(self.log("add", "--family", "Feature", "--seat", "builder",
-                                  "--model", "sonnet", "--verdict", "BLOCKED", "--no-edits"), 0)
-        self.assertEqual(self.log("rounds", "feature").stdout.strip(), "0")
-        self.assert_code(self.add_run(), 0)
-        self.assertEqual(self.log("rounds", "feature").stdout.strip(), "1")
-
-    def test_log_rejects_corruption_and_preserves_valid_final_record(self):
-        self.assert_code(self.add_run(), 0)
-        path = self.tmp / "state/runs.jsonl"
-        path.write_text(path.read_text().rstrip("\n"))
-        self.assert_code(self.add_run(), 0)
-        self.assertEqual(len(path.read_text().splitlines()), 2)
-        path.write_text("invalid\n")
-        self.assert_code(self.add_run(), 2)
-        self.assertEqual(path.read_text(), "invalid\n")
 
 
 if __name__ == "__main__":

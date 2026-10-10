@@ -1,8 +1,34 @@
 # Router
 
-Router sends bounded Claude Code and OpenAI Codex CLI tasks to the model that fits them and gives each result to a fresh judge. It combines a dispatch skill, named agents, routing hooks and small command-line helpers. Python code uses only the standard library.
+Get cheaper models for simple work, stronger models for hard work, and every result judged. A brief is checked before it costs a run, and active lanes are restored after compaction.
 
-For developers using Claude Code or Codex CLI who split work across subagents and want cheap models on simple tasks, stronger ones on hard tasks, and every result checked.
+Router routes bounded tasks in Claude Code and Codex CLI. Pair it with [Harness](https://github.com/aeiadev/harness) for checkpoint restore and context pressure signals.
+
+## Demo
+
+Give a builder this brief:
+
+```text
+TASK Check parser empty input.
+FILES src/parser.py tests/test_parser.py
+RETURN Five lines: CHANGED / BAR / OUTPUT / NOT DONE / OPEN.
+```
+
+Claude Code denies the spawn before it costs a round: `brief: BAR missing (builder needs TASK, FILES, BAR, RETURN in that order)`. With a complete brief, inspect the run from an installed checkout:
+
+```bash
+router lanes
+router report
+router doctor
+```
+
+Stable lines in a fresh HOME after `bash install.sh --host both`:
+
+```text
+no lanes
+codex lanes: 0 (no verdicts on Codex)
+[ok] spawn: dry run allowed a sweeper brief
+```
 
 A seat is a named agent role. The owner is the session coordinating the work. Each task has a BAR: the acceptance command that checks its result.
 
@@ -18,12 +44,49 @@ Split work only when it divides cleanly, fits a clear four-line brief, has a ver
 
 The dispatch skill guides this workflow. The host-specific hooks enforce the checks listed below; the owner still starts the judge and decides whether to accept the result.
 
+<!-- shared:begin -->
+### Install both
+
+[Router](https://github.com/aeiadev/router) routes bounded work to model tiers, checks Claude briefs before a run, and tracks lanes and verdicts. [Harness](https://github.com/aeiadev/harness) guards commands and restores project context. Together, they share roles and add a context pressure signal; each prints its own restore content, so they never write the same line twice.
+
+Clone and install each checkout in either order:
+
+<!-- docs:skip -->
+```bash
+git clone https://github.com/aeiadev/router.git
+cd router && bash install.sh --host both
+```
+
+<!-- docs:skip -->
+```bash
+git clone https://github.com/aeiadev/harness.git
+cd harness && bash install.sh --host both
+```
+
+For Codex, start a new session and review and trust the hooks. Changed scripts can prompt another trust review.
+
+### Upgrade
+
+Run `install.sh` from the new checkout of each tool. An unchanged old file that is no longer shipped is removed and listed; an edited one is kept and listed. `--dry-run` previews changes. Shared roles that the sibling already installed are claimed by this tool, never rewritten. If the sibling is older, the installer prints one notice; upgrade both to get the new shared roles. A 0.2 installer run after a 0.3 sibling still refuses and leaves files unchanged, so upgrade both.
+
+Uninstall restores the original settings bytes and removes only files the tool created. Backups stay until `--purge`: alone, it lists and removes that tool's own backups; Router also removes its retired attempts.sqlite3. With `--uninstall`, it uninstalls then purges; with `--dry-run`, it lists only. Harness `install.sh --status` and `router doctor` show installed versions and skew; Router `install.sh --status` reports Claude Code plugin state.
+
+From 0.1 or 0.2: those releases did not record which backup held your settings. Uninstall restores the oldest Router or Harness backup only when it holds exactly the settings left once both tools are removed; otherwise it writes that content in standard JSON layout, or removes the file when no backup is left and nothing else remains. If Harness 0.1 or 0.2 went first, the file stays 0600.
+
+### Claude Code plugin route
+
+In Claude Code, `/plugin marketplace add aeiadev/router`, then `/plugin install router@router` and `/plugin install shared-roles@router`. The settings form is `{"enabledPlugins": {"router@router": true}}`. Plugin agents use names such as `router:builder-std`. A script install wins over the plugin: plugin hooks stand down when the install manifest exists. Codex has no plugin; it is not shipped there.
+<!-- shared:end -->
+
 ## Install
+
+Pair with [Harness](https://github.com/aeiadev/harness) for guarded commands and context restore; the shared Install both and Upgrade block above covers both tools.
 
 Requirements: Bash, Python 3.10 or newer, Git and Claude Code or Codex CLI with subagents and command hooks. The Codex adapter uses the spawn hook format as of Codex CLI 0.156. Use a Unix-like environment. The hook state uses standard-library SQLite and file locking. The helper checks and test commands use `timeout` from GNU coreutils.
 
 From a local checkout:
 
+<!-- docs:skip -->
 ```bash
 bash install.sh --host both --dry-run
 bash install.sh --host both
@@ -44,6 +107,7 @@ helpers to `~/.codex/router/bin`. It merges [the hook template](codex/hooks.json
 `~/.codex/hooks.json`, backing up an existing file and preserving unrelated hooks.
 Set `CODEX_HOME` to use another location. For Codex-only installs:
 
+<!-- docs:skip -->
 ```bash
 bash install.sh --host codex
 export PATH="${CODEX_HOME:-$HOME/.codex}/router/bin:$PATH"
@@ -58,6 +122,7 @@ It refuses to overwrite differing pre-existing files or locally modified package
 
 For another configuration directory, export `CLAUDE_HOME` before installing and keep it set when using Router:
 
+<!-- docs:skip -->
 ```bash
 export CLAUDE_HOME="$HOME/.claude-test"
 bash install.sh
@@ -66,6 +131,7 @@ export PATH="$CLAUDE_HOME/router/bin:$PATH"
 
 Review [the settings example](examples/settings.example.json) for the hooks block. Without `--with-defaults`, the installer never edits `CLAUDE.md` or `AGENTS.md`; with it, see [Delegation defaults](#delegation-defaults). If pasting [the instruction snippet](examples/CLAUDE.md.snippet) by hand, paste without the markers. Start a new Claude Code session after installation so the agents and skill are loaded.
 
+<!-- docs:skip -->
 ```bash
 bash install.sh --host both --uninstall --dry-run
 bash install.sh --host both --uninstall
@@ -170,7 +236,7 @@ The same execution brief gets Sonnet, one Sonnet resend with the judge's specifi
 route: up ladder
 ```
 
-A fourth attempt is blocked and goes back to the owner for replanning. The hooks count accepted execution spawns, not successful completions. They identify a brief from normalized `TASK` and `FILES` and store the count in `attempts.sqlite3` under the state directory. Keep those lines stable during retries. `BAR`, `RETURN` and the route directive do not reset the count.
+A fourth attempt is blocked and goes back to the owner for replanning. The hooks count accepted execution spawns, not successful completions. They identify a brief from normalized `TASK` and `FILES` in `ledger.sqlite3` under the state directory. `router ladder list` shows keys; `router ladder reset <key>` leaves those attempts archived. The default `router.ladder_ttl_hours` is 12. Keep those lines stable during retries. `BAR`, `RETURN` and the route directive do not reset the count.
 
 Explicit upper-tier reasons are `risk`, `security`, `novel`, `cross-cutting` and `ladder`. The execution ladder takes precedence over an early escalation request. On Claude, a judge always runs on Opus and has any resume request removed.
 
@@ -263,22 +329,21 @@ package files unchanged. `router status` includes the mode. `router off` or
 
 ## What each host enforces
 
-| Check | Claude hooks | Codex hooks |
+| Check | Claude Code | Codex |
 | --- | --- | --- |
-| Rule modes | `off` skips, `shadow` records without applying, `enforce` applies | Same `router.modes` keys and shared allow/deny policy for visible inputs |
-| Model selection | Route rewrites and agent frontmatter | Installed role TOML pins win over per-call model/effort; shared model exclusion and up-code checks apply |
-| Unlisted or omitted role | Shared model checks apply; model injection or default-role redirect follows its rule mode | Shared model checks apply; no model injection or default-role rewrite. Name an installed role to obtain its pins |
-| Execution ladder | TASK/FILES hash, two standard attempts then explicit upper, fourth denied | Task name/base-role hash, same shared policy and transactional counter; a missing task name is denied only with `ladder=enforce` |
-| Incompatible execution tier | Rewrites the role/model to the required tier | Denies with the role to retry when the ladder is enforced, because a pinned model cannot be rewritten |
-| Explicit up code | Reads `route: up <code>` from the prompt | Cannot read encrypted route text; only an execution upper role with an enforced ladder supplies the ladder request |
-| Nested spawns | Guarded | Guarded |
-| Automatic suggest | UserPromptSubmit adds one keyword-based role hint in `suggest` mode | Same; UserPromptSubmit exposes the prompt even though spawn messages are encrypted |
-| Automatic enforce | Main-session Read/Grep/Glob/Bash/Edit/Write thresholds; explicit allowed paths and subagents exempt | Observed shell calls use Bash. Codex edit counting is unverified: the spike identified Write/Edit-style patches but did not confirm the assumed Edit payload with `file_path`. Only visible file paths count; shell-written files and tools without these events are not observable |
-| Kill switch | Shared OFF file or `ROUTER_OFF=1` | The same file and environment flag |
-| Brief risk words and FILES globs | Available; risk mode defaults to shadow | Unavailable because `message` is encrypted |
-| Four-field brief lint | Skill and agent instructions; not spawn-hook enforced | Role `developer_instructions` and dispatch skill; not hook-enforced |
-| Fresh judge context | Resume removed by spawn hook | Requested by role and skill instructions (`fork_turns="none"`); not hook-enforced |
-| Return size and reading/context rules | Context hook, according to rule modes | The PreToolUse context-note hook is installed, but whether Codex shows its `additionalContext` to the model is unverified. Observable read/edit thresholds are installed, with edit counting unverified as above; return caps remain role instructions only |
+| C1 spawn check | Enforced before a round is spent | not possible: spawn message is encrypted; role text asks for the brief |
+| C3 lanes | Running, returned and judged | partial: running only; no SubagentStop registered, fields unverified |
+| C3 verdicts, reminder, re-run block | Verdicts and one reminder, with passed brief rerun block | not possible: no verdict path |
+| C4 Router note | Lanes and verdicts after compact | partial: running lanes only |
+| Resume cache warning | Available through Harness | not possible: Claude-only field |
+| B2 window reminders | Live window when available | partial: rollout window or policy fallback |
+| C5 pressure nudges | Matching fresh pressure tightens thresholds | partial: enforce works; visibility unverified |
+| run_in_background exemption | Harness permits tracked Claude tasks | n/a: no parameter; `npm run dev &` stays blocked |
+| router report | Spawns, judge verdicts and readable tokens | partial: no verdicts; readable tokens only |
+| Cache-hit % | Harness statusline can show it | not possible: no command statusline |
+| C7 plugins | Claude Code marketplace route above | not shipped |
+
+Codex role text requests a fresh judge and four fields, but its hook cannot read the encrypted spawn brief. Its compact note lists running lanes only. Codex patch edit visibility and pressure nudge display remain unverified.
 
 A lane is one task's worktree run. `close-lane.sh` checks its brief for exactly one nonempty TASK, FILES, BAR, and
 RETURN on either host. It accepts free-text notes after those fields. The dispatch
@@ -310,9 +375,25 @@ Set overrides in the environment inherited by your host and by the CLI.
 | `XDG_STATE_HOME` | `$HOME/.local/state` | Base state directory when `ROUTER_STATE` is unset |
 | `ROUTER_OFF_FILE` | `$ROUTER_STATE/OFF` | Alternate persistent kill-switch file |
 | `ROUTER_OFF` | Unset | `1` disables routing immediately |
+| `ROUTER_LOCAL` | `${XDG_CONFIG_HOME:-$HOME/.config}/router/routes.local.json` | Local JSON Merge Patch overlay; `off` disables it |
 | `ROUTER_TEST_NOW_MS` | System clock | Test-only context-hook time, in milliseconds since the Unix epoch; leave unset for normal use |
 
-The hooks write diagnostic metadata under the state directory. They do not log prompt bodies. Context limits are character counts configured in `context.caps`. Read-only agents trim their replies instead of writing reports. Internal hook errors allow the tool call and record an error when possible.
+The hooks write `ledger.sqlite3` under the state directory with file mode 0600 and directory mode 0700. It stores no prompt, BAR, RETURN or finding text; verdict findings are counts. They do not log prompt bodies. Context limits are character counts configured in `context.caps`. Read-only agents trim their replies instead of writing reports. Internal hook errors allow the tool call and record an error when possible.
+
+## 0.3 commands
+
+| Command | Use |
+| --- | --- |
+| `router ladder list\|reset` | List ladder keys or reset a key, which is archived. |
+| `router lanes` | Show recent lanes of this project; `--all` shows every project; `--session HASH` filters one session. |
+| `router report` | Show spawns, judge coverage, first pass rates, context blocks and readable token totals; `--since N` sets the window (such as `36h` or `7d`, default 7d, at most 90d) and `--json` prints the data as JSON. |
+| `router doctor` | Check installed hooks, roles, routes, versions and sibling skew without changing files; `--host claude` or `--host codex` checks one host. |
+| `router config path\|get\|set\|unset\|check` | Find, inspect, change or validate the local override. |
+| `router promote RULE --dry-run` | Preview promotion from shadow to enforce; `--since N` sets the evidence window (at most 90d); without dry run, report evidence is required unless `--force` is given. |
+
+The local override path is `${XDG_CONFIG_HOME:-$HOME/.config}/router/routes.local.json`; set `ROUTER_LOCAL=PATH` to use another file. Apply [careful](examples/presets/careful.local.json), [medium](examples/presets/medium.local.json), or [small](examples/presets/small.local.json) by pointing `ROUTER_LOCAL` at it or copying it to the override path. `router config set` and `router promote` replace a symlinked overlay with a real 0600 file; the symlink target is untouched. An invalid override falls back to shipped routes for hooks and is reported by status, config check and doctor.
+
+`router.modes.brief`, `router.modes.rerun` and `router.modes.judge_reminder` control brief checks, a same-session rerun block and judge reminders. `router.lane_labels` controls saved lane labels. `router.ladder_ttl_hours` controls the ladder window. Hint settings `context.prompt_roles` and `context.hint_every` tune scored hints and their rate limit; `router auto` selects off, suggest, nudge or enforce. Harness context-pressure nudges tighten read and chain thresholds when a fresh matching signal exists. An event is treated as Codex pressure only when it carries `turn_id`; this detection is inferred and unverified against a live Codex session.
 
 ## Adapt the routes
 
@@ -343,25 +424,18 @@ The installer places these alongside `router` in `router/bin`:
 | `wait-until.sh SECONDS no-proc REGEX` | Wait until no process matches |
 | `cite-check.py REPORT --root WORKTREE` | Check file and line citations in a report |
 | `close-lane.sh WORKTREE BRIEF` | Check changed paths against `FILES`, run `BAR`, then check scope again |
-| `dispatch-log.py list` | Read the optional generic run log |
 
 `close-lane.sh` runs the BAR from the worktree root. Give it a brief you trust: the BAR is a shell command. In `FILES`, `*` and `?` match within one path segment, `**` spans segments, and a trailing `/` allows a subtree. Quote patterns containing spaces.
 
 Use `CLOSE_LANE_BASE` to choose the Git base for committed changes; the default is local `main`, then `master`, then `HEAD`. The check freezes the merge base before running the BAR. With the `HEAD` fallback, only working changes are checked, so specify a base when reviewing commits on another branch. `CLOSE_LANE_BAR_TIMEOUT` limits the check, defaulting to 900 seconds. Neither a scope check nor a passing BAR replaces the fresh judge.
 
-The optional logger writes `$ROUTER_STATE/runs.jsonl` with the same state default as the hooks. For example:
-
-```bash
-dispatch-log.py add --family parser-empty --seat builder --model sonnet --verdict PASS
-dispatch-log.py rounds parser-empty
-```
-
-For each family it caps execution records at two Sonnet rounds followed by one Opus round marked `--escalated`. It is a separate run record; hook enforcement uses `attempts.sqlite3`.
+The verdict record is the ledger. Use `router lanes` and `router report` to inspect it.
 
 ## Development
 
 Tests need no network, private configuration or model calls:
 
+<!-- docs:skip -->
 ```bash
 timeout 900 bash -c 'for t in tests/test_*.py; do python3 "$t" || exit 1; done && bash tests/fresh-user.sh && bash tests/fresh-user-codex.sh'
 ```

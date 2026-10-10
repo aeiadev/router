@@ -1,0 +1,98 @@
+name: CI
+on:
+  push:
+  pull_request:
+env:
+  HARNESS_REPOSITORY: aeiadev/harness
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HARNESS_REPOSITORY }}
+          path: harness
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Old release trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/old-trees"
+          mkdir -p "$RUNNER_TEMP/old-trees/router-0.1" "$RUNNER_TEMP/old-trees/router-0.2" "$RUNNER_TEMP/old-trees/harness-0.1" "$RUNNER_TEMP/old-trees/harness-0.2"
+          git archive 36acbaf | tar -x -C "$RUNNER_TEMP/old-trees/router-0.1"
+          git archive v0.2.0 | tar -x -C "$RUNNER_TEMP/old-trees/router-0.2"
+          git -C harness archive 063388b | tar -x -C "$RUNNER_TEMP/old-trees/harness-0.1"
+          git -C harness archive v0.2.0 | tar -x -C "$RUNNER_TEMP/old-trees/harness-0.2"
+          echo "ROUTER_V01=$RUNNER_TEMP/old-trees/router-0.1" >> "$GITHUB_ENV"
+          echo "ROUTER_V02=$RUNNER_TEMP/old-trees/router-0.2" >> "$GITHUB_ENV"
+          echo "HARNESS_V01=$RUNNER_TEMP/old-trees/harness-0.1" >> "$GITHUB_ENV"
+          echo "HARNESS_V02=$RUNNER_TEMP/old-trees/harness-0.2" >> "$GITHUB_ENV"
+      - name: Tests
+        run: |
+          for t in tests/test_*.py; do python3 "$t" || exit 1; done
+      - name: Claude fresh user
+        run: bash tests/fresh-user.sh
+      - name: Codex fresh user
+        run: bash tests/fresh-user-codex.sh
+      - name: Shared pins
+        run: |
+          cd agents
+          if [ "$RUNNER_OS" = macOS ]; then shasum -a 256 -c SHARED.sha256; else sha256sum -c SHARED.sha256; fi
+      - name: Plugin drift
+        run: python3 scripts/gen_plugin.py --check
+      - name: Plugin validate
+        run: |
+          if command -v claude >/dev/null; then claude plugin validate .; claude plugin validate plugins/router; claude plugin validate plugins/shared-roles; fi
+  together:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        harness-ref: [main, latest-tag]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HARNESS_REPOSITORY }}
+          path: harness
+          fetch-depth: 0
+      - name: Resolve Harness ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.harness-ref }}" = main ]; then
+            ref=main
+          else
+            ref=$(bash scripts/harness-ref.sh harness VERSION)
+            if [ -z "$ref" ]; then echo "notice: no Harness release tag for $(cat VERSION)"; exit 0; fi
+          fi
+          git -C harness checkout --detach "$ref"
+          echo "HARNESS_REF=$ref" >> "$GITHUB_ENV"
+      - name: Together
+        if: env.HARNESS_REF != ''
+        run: HARNESS_DIR=$PWD/harness bash tests/together.sh
+  shared-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HARNESS_REPOSITORY }}
+          path: harness
+      - run: cmp agents/SHARED.sha256 harness/agents/SHARED.sha256
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.18.4 detect --source . --no-banner
