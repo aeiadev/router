@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Standalone helper checks with temporary state and local Git repositories."""
+import ast
+import contextlib
+import ctypes
+import io
+import re
 import json
 import os
 from pathlib import Path
@@ -7,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,19 +97,195 @@ class ScriptTests(unittest.TestCase):
         # Windows os.kill(pid, 0) sends CTRL_C_EVENT to the process group pid: a probe must not stop what it
         # watches. The child leads its own group with Ctrl+C on, so such a probe would end it.
         marker = f"router_wait_marker_{os.getpid()}"
-        code, flags = "import time; time.sleep(30)", 0
+        ready = self.tmp / "child-ready"
+        code, flags = ("import pathlib, sys; "
+                       "pathlib.Path(sys.argv[1]).write_text('ready'); sys.stdin.buffer.read(1)"), 0
         if os.name == "nt":
-            code = "import ctypes, time; ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False); time.sleep(30)"
+            code = ("import ctypes, pathlib, sys; "
+                    "ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False); "
+                    "pathlib.Path(sys.argv[1]).write_text('ready'); sys.stdin.buffer.read(1)")
             flags = subprocess.CREATE_NEW_PROCESS_GROUP
-        child = subprocess.Popen([sys.executable, "-c", code, marker], stdin=subprocess.DEVNULL, creationflags=flags)
+        child = subprocess.Popen([sys.executable, "-c", code, str(ready), marker],
+                                 stdin=subprocess.PIPE, creationflags=flags)
+        self.addCleanup(child.stdin.close)
         self.addCleanup(child.wait, 10)
         self.addCleanup(child.kill)
+        deadline = time.monotonic() + 5
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready.exists(), f"child did not signal readiness; exit={child.poll()}")
         # no-proc matches the command line, not just the program name (python.exe on Windows).
         for arguments in (("pid", child.pid), ("exists", self.tmp / "missing", "--alive", child.pid),
                           ("no-proc", marker)):
             with self.subTest(mode=arguments[0]):
-                self.assert_code(self.run_script("wait-until.sh", "0.5", *arguments), 124)
-                self.assertIsNone(child.poll(), "the wait stopped the process it was watching")
+                result = self.run_script("wait-until.sh", "0.5", *arguments)
+                self.assertIsNone(child.poll(), "the watched child exited before the wait result was checked")
+                self.assert_code(result, 124)
+
+    def test_wait_windows_snapshot_failure_is_not_absence(self):
+        # Exercise the actual embedded scanner with a failed first read and a partial read.
+        source = (SCRIPTS / "wait-until.sh").read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        scanner = next(node for node in ast.parse(source).body
+                       if isinstance(node, ast.If) and
+                       any(isinstance(child, ast.FunctionDef) and child.name == "windows_processes"
+                           for child in node.body))
+        function = next(child for child in scanner.body
+                        if isinstance(child, ast.FunctionDef) and child.name == "windows_processes")
+        module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+        for first, error in ((False, 5), (True, 5)):
+            with self.subTest(first=first):
+                closed = []
+                entry = SimpleNamespace(size=0, pid=42, ppid=1, exe="python.exe")
+                api = SimpleNamespace(CreateToolhelp32Snapshot=lambda *_: 7,
+                                      Process32FirstW=lambda *_: first,
+                                      Process32NextW=lambda *_: False,
+                                      CloseHandle=closed.append)
+                fake_ctypes = SimpleNamespace(sizeof=lambda *_: 1, create_string_buffer=lambda *_: None,
+                                               byref=lambda value: value, set_last_error=lambda *_: None,
+                                               get_last_error=lambda: error,
+                                               WinError=lambda value: OSError(value, "snapshot read failed"))
+                namespace = dict(kernel32=api, ProcessEntry=lambda: entry, ctypes=fake_ctypes,
+                                 wintypes=SimpleNamespace(HANDLE=lambda value: SimpleNamespace(value=value)),
+                                 command_line=lambda *_: "python marker")
+                exec(compile(module, str(SCRIPTS / "wait-until.sh"), "exec"), namespace)
+                with self.assertRaises(OSError):
+                    namespace["windows_processes"]()
+                self.assertEqual(closed, [7], "snapshot handle leaked after enumeration failure")
+
+    def wait_namespace(self):
+        source = (SCRIPTS / "wait-until.sh").read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        tree = ast.parse(source)
+        block = next(node for node in tree.body if isinstance(node, ast.If)
+                     and isinstance(node.test, ast.Name) and node.test.id == "WINDOWS")
+        functions = [node for node in block.body + tree.body if isinstance(node, ast.FunctionDef)]
+        namespace = dict(WINDOWS=True, os=os, time=time, sys=sys, subprocess=subprocess,
+                         args=SimpleNamespace(kind="no-proc", alive=None, seconds=0.01),
+                         pattern=re.compile("closure_marker"), deadline=0)
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "wait-until.sh", "exec"), namespace)
+        loop = next(node for node in tree.body if isinstance(node, ast.Try)
+                    and any(isinstance(child, ast.While) for child in node.body))
+        namespace["_loop"] = compile(ast.Module(body=[loop] + tree.body[-2:], type_ignores=[]),
+                                     "wait-until.sh", "exec")
+        return namespace
+
+    def wait_result(self, namespace):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as result:
+            exec(namespace["_loop"], namespace)
+        return result.exception.code, errors.getvalue()
+
+    def test_wait_windows_reused_parent_is_not_ancestor(self):
+        # A surviving ancestor retains its dead parent's PID. That PID can now name our target.
+        namespace = self.wait_namespace()
+        me, parent, target = os.getpid(), 10000001, 10000002
+        rows = [(me, parent, "scanner"), (parent, target, "shell"),
+                (target, 0, "python closure_marker")]
+        namespace.update(windows_processes=lambda: rows,
+                         process_started=lambda pid: {me: 30, parent: 10, target: 20}[pid])
+        self.assertEqual(self.wait_result(namespace)[0], 124, "target was excluded as a fake ancestor")
+        # The ancestor can exit and its PID be reused between edges. Keep its proven identity.
+        parent_times = iter((10, 40))
+        namespace["process_started"] = lambda pid: next(parent_times) if pid == parent else {me: 30, target: 20}[pid]
+        self.assertEqual(self.wait_result(namespace)[0], 124, "ancestor identity changed during the walk")
+        # A genuinely older ancestor remains excluded; unverifiable identity must not exclude it.
+        namespace["process_started"] = lambda pid: {me: 30, parent: 20, target: 10}[pid]
+        self.assertEqual(self.wait_result(namespace)[0], 0)
+        namespace["process_started"] = lambda pid: None
+        self.assertEqual(self.wait_result(namespace)[0], 124)
+
+    def test_wait_windows_query_failure_is_not_absence(self):
+        # Run the actual command-line reader and wait loop, with a controlled live process handle.
+        for status, empty in ((0xC0000001, False), (0x8000000D, False), (0, True)):
+            with self.subTest(status=status, empty=empty):
+                namespace = self.wait_namespace()
+                closed = []
+                api = SimpleNamespace(OpenProcess=lambda *_: 7, CloseHandle=closed.append,
+                                      GetExitCodeProcess=lambda handle, code: setattr(code._obj, "value", 259) or 1)
+                namespace.update(kernel32=api, ntdll=SimpleNamespace(NtQueryInformationProcess=lambda *_: status),
+                                 QUERY=0x1000, STILL_ACTIVE=259, ctypes=ctypes,
+                                 wintypes=SimpleNamespace(ULONG=ctypes.c_uint32, DWORD=ctypes.c_uint32),
+                                 UnicodeString=SimpleNamespace(from_buffer=lambda _: SimpleNamespace(buffer=None)),
+                                 same_user=lambda _: True, process_started=lambda _: None)
+                namespace["windows_processes"] = lambda: [
+                    (10000002, 0, namespace["command_line"](10000002, ctypes.create_string_buffer(256))
+                     or "python.exe")]
+                code, error = self.wait_result(namespace)
+                self.assertEqual(code, 2, "failed query silently lost the marker and returned success")
+                self.assertIn("10000002", error)
+                self.assertEqual(closed, [7])
+                # The same unavailable query for another account retains executable-only matching.
+                namespace["same_user"] = lambda _: False
+                self.assertEqual(self.wait_result(namespace)[0], 0)
+                namespace["pattern"] = re.compile("python")
+                self.assertEqual(self.wait_result(namespace)[0], 124, "executable matching was lost")
+                namespace["pattern"] = re.compile("closure_marker")
+                namespace["same_user"] = lambda _: True
+                api.GetExitCodeProcess = lambda handle, code: setattr(code._obj, "value", 0) or 1
+                self.assertEqual(self.wait_result(namespace)[0], 0, "an exited process blocked absence")
+
+    def test_wait_windows_open_errors(self):
+        for pid, error, expected in ((0, 87, 0), (4, 5, 0), (10000002, 87, 0), (10000002, 8, 2)):
+            with self.subTest(pid=pid, error=error):
+                namespace = self.wait_namespace()
+                namespace.update(kernel32=SimpleNamespace(OpenProcess=lambda *_: None), QUERY=0x1000,
+                                 ctypes=SimpleNamespace(get_last_error=lambda: error))
+                namespace["windows_processes"] = lambda: [(pid, 0, namespace["command_line"](pid, None)
+                                                           or "system.exe")]
+                result, diagnostic = self.wait_result(namespace)
+                self.assertEqual(result, expected, diagnostic)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows API fault injection")
+    def test_wait_windows_live_child_faults(self):
+        ready = self.tmp / "native-ready"
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import pathlib,sys; pathlib.Path(sys.argv[1]).touch(); sys.stdin.buffer.read(1)",
+                                  str(ready), "closure_marker"], stdin=subprocess.PIPE)
+        self.addCleanup(child.stdin.close)
+        self.addCleanup(child.wait, 10)
+        self.addCleanup(child.kill)
+        deadline = time.monotonic() + 5
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready.exists())
+        source = (SCRIPTS / "wait-until.sh").read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        block = next(node for node in ast.parse(source).body if isinstance(node, ast.If)
+                     and isinstance(node.test, ast.Name) and node.test.id == "WINDOWS")
+        namespace = self.wait_namespace()
+        exec(compile(ast.Module(body=[block], type_ignores=[]), "wait-until.sh", "exec"), namespace)
+        kernel, ntdll = namespace["kernel32"], namespace["ntdll"]
+        kernel.GetProcessId.argtypes = (namespace["wintypes"].HANDLE,)
+        kernel.GetProcessId.restype = namespace["wintypes"].DWORD
+        # Preserve native enumeration, handles and timestamps. Inject only a stale parent link.
+        class KernelProxy:
+            def __getattr__(self, name):
+                return getattr(kernel, name)
+
+            def Process32NextW(self, snapshot, entry):
+                result = kernel.Process32NextW(snapshot, entry)
+                if result and entry._obj.pid == os.getpid():
+                    entry._obj.ppid = child.pid
+                return result
+
+        namespace["kernel32"] = KernelProxy()
+        with self.subTest(fault="reused parent PID"):
+            result = self.wait_result(namespace)
+            self.assertIsNone(child.poll())
+            self.assertEqual(result[0], 124, result[1])
+        namespace["kernel32"] = kernel
+        original = ntdll.NtQueryInformationProcess
+        def fail_child(handle, kind, *rest):
+            return -1073741823 if kind == 60 and kernel.GetProcessId(handle) == child.pid else original(handle, kind, *rest)
+        namespace["ntdll"] = SimpleNamespace(NtQueryInformationProcess=fail_child)
+        with self.subTest(fault="live child query failed"):
+            result = self.wait_result(namespace)
+            self.assertIsNone(child.poll())
+            self.assertEqual(result[0], 2, result[1])
+            self.assertIn(str(child.pid), result[1])
+        namespace["ntdll"] = ntdll
+        with self.subTest(fault="none"):
+            result = self.wait_result(namespace)
+            self.assertIsNone(child.poll())
+            self.assertEqual(result[0], 124, result[1])
 
     def git(self, *arguments):
         result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(self.repo),

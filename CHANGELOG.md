@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+Pairs with Harness 0.3.2.
+
+### Fixed
+
+- Validate Windows process creation times before excluding ancestor PIDs in `wait-until.sh no-proc`, so a reused parent PID cannot hide a matching process.
+- Report incomplete process snapshots and unreadable command lines for live processes owned by the caller as errors instead of successful absence. Protected processes and unreadable processes of other accounts remain matched by executable name, as stated in `--help`.
+- Keep the watched-process test child alive until its parent releases it, and check readiness and liveness before interpreting the wait result. Add regressions for snapshot errors, failed command-line reads and reused process IDs.
+
 ## 0.3.1
 
 Pairs with Harness 0.3.1. If the installed Harness is older, the installer prints one upgrade notice; upgrade both tools.

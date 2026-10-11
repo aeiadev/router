@@ -460,6 +460,8 @@ The installer places these alongside `router` in `router/bin`:
 
 On native Windows, `wait-until.sh` checks a `pid` without signalling it, reads the process table itself for `no-proc`, and maps a pid from Git Bash `$!` to its Windows pid.
 
+For Windows `no-proc`, readable command lines are matched in full. Inaccessible processes and unreadable processes of other accounts are matched by executable name only. A failed process-table read or an unreadable command line of a live process owned by your account exits 2; it does not report successful absence.
+
 `close-lane.sh` runs the BAR from the worktree root. Give it a brief you trust: the BAR is a shell command. In `FILES`, `*` and `?` match within one path segment, `**` spans segments, and a trailing `/` allows a subtree. Quote patterns containing spaces.
 
 Use `CLOSE_LANE_BASE` to choose the Git base for committed changes; the default is local `main`, then `master`, then `HEAD`. The check freezes the merge base before running the BAR. With the `HEAD` fallback, only working changes are checked, so specify a base when reviewing commits on another branch. `CLOSE_LANE_BAR_TIMEOUT` limits the check, defaulting to 900 seconds. Neither a scope check nor a passing BAR replaces the fresh judge.

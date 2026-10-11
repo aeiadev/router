@@ -79,7 +79,7 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertEqual(result.stdout, source.strip() + "\n")
 
     def test_pairs_with_line_leads_each_release(self):
-        for version in ("0.3.0", "0.2.0"):
+        for version in ("0.3.2", "0.3.0", "0.2.0"):
             with self.subTest(version=version):
                 result = self.run_script(version)
                 self.assertEqual(result.returncode, 0, result.stderr)

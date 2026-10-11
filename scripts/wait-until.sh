@@ -41,7 +41,10 @@ import subprocess
 import sys
 import time
 
-parser = argparse.ArgumentParser(description="Wait for a condition; timeout exits 124.")
+parser = argparse.ArgumentParser(description="Wait for a condition; timeout exits 124.",
+    epilog="Windows no-proc: matches readable command lines; inaccessible processes and unreadable "
+           "processes of other accounts match by executable name only. An unreadable command line "
+           "of a live process owned by this account is an error (exit 2).")
 parser.add_argument("seconds", type=float)
 parser.add_argument("kind", choices=("pid", "no-proc", "line", "exists"))
 parser.add_argument("targets", nargs="+")
@@ -72,6 +75,7 @@ if WINDOWS:
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     ntdll = ctypes.WinDLL("ntdll")
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     QUERY = 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION: read only, no right to stop the process
     STILL_ACTIVE = 259
 
@@ -88,6 +92,11 @@ if WINDOWS:
     kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
     kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+    advapi32.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    advapi32.GetTokenInformation.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                           wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+    advapi32.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
     kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
     kernel32.Process32FirstW.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry))
@@ -106,16 +115,58 @@ if WINDOWS:
         finally:
             kernel32.CloseHandle(handle)
 
+    def process_started(pid):
+        handle = kernel32.OpenProcess(QUERY, False, pid)
+        if not handle:
+            return None  # Unverified identity is never grounds for excluding an ancestor.
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if kernel32.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
+                return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+            return None
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def same_user(handle):
+        # Compare TokenUser SIDs only when a command-line read failed. Never emit token data.
+        users = []
+        for process in (wintypes.HANDLE(-1), handle):  # Current-process pseudo handle, then target.
+            token = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(process, 8, ctypes.byref(token)):  # TOKEN_QUERY
+                if ctypes.get_last_error() == 5 and users:
+                    return False  # Protected/inaccessible target.
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                user = ctypes.create_string_buffer(256)  # TOKEN_USER + SID (maximum 68 bytes).
+                if not advapi32.GetTokenInformation(token, 1, user, len(user), ctypes.byref(wintypes.DWORD())):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                users.append(user)
+            finally:
+                kernel32.CloseHandle(token)
+        return bool(advapi32.EqualSid(*(ctypes.c_void_p.from_buffer(user) for user in users)))
+
     def command_line(pid, buffer):
         handle = kernel32.OpenProcess(QUERY, False, pid)
         if not handle:
-            return None
+            error = ctypes.get_last_error()
+            if error in (5, 87):  # Access denied; exited process or System Idle (PID 0).
+                return None
+            raise OSError(f"OpenProcess pid={pid} error={error}")
         try:
             # 60 = ProcessCommandLineInformation (Windows 8.1+): a UNICODE_STRING, then its text.
-            if ntdll.NtQueryInformationProcess(handle, 60, buffer, len(buffer), ctypes.byref(wintypes.ULONG())):
-                return None
-            text = UnicodeString.from_buffer(buffer)
-            return ctypes.wstring_at(text.buffer, text.length // 2) if text.buffer else None
+            status = ntdll.NtQueryInformationProcess(handle, 60, buffer, len(buffer), ctypes.byref(wintypes.ULONG()))
+            if not status:
+                text = UnicodeString.from_buffer(buffer)
+                if text.buffer and text.length:
+                    return ctypes.wstring_at(text.buffer, text.length // 2)
+            code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != STILL_ACTIVE:
+                return None  # Exited during the scan.
+            # Some system processes have no user-mode command line, even with a query handle.
+            # Preserve exe-only matching for inaccessible/other-account processes, not our live children.
+            if same_user(handle):
+                raise OSError(f"command line unavailable pid={pid} status=0x{status & 0xffffffff:08x}")
+            return None
         finally:
             kernel32.CloseHandle(handle)
 
@@ -127,9 +178,14 @@ if WINDOWS:
         entry.size = ctypes.sizeof(entry)
         try:
             more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            if not more:
+                raise ctypes.WinError(ctypes.get_last_error())
             while more:
                 rows.append((entry.pid, entry.ppid, command_line(entry.pid, buffer) or entry.exe))
+                ctypes.set_last_error(0)
                 more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+                if not more and ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES ends enumeration.
+                    raise ctypes.WinError(ctypes.get_last_error())
         finally:
             kernel32.CloseHandle(snapshot)
         return rows
@@ -171,9 +227,17 @@ def ready():
     processes = windows_processes() if WINDOWS else ps_processes()
     parents = {row[0]: row[1] for row in processes}
     excluded, pid = set(), os.getpid()
+    started = process_started(pid) if WINDOWS else None
     while pid and pid not in excluded:
         excluded.add(pid)
-        pid = parents.get(pid, 0)
+        parent = parents.get(pid, 0)
+        if WINDOWS and parent:
+            parent_started = process_started(parent)
+            # Windows retains a dead parent's PID, which may now belong to a younger unrelated process.
+            if started is None or parent_started is None or parent_started >= started:
+                break
+            started = parent_started
+        pid = parent
     return not any(row[0] not in excluded and "wait-until.sh" not in row[2]
                    and pattern.search(row[2]) for row in processes)
 
