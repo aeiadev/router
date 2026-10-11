@@ -273,7 +273,7 @@ class DocsTests(unittest.TestCase):
     def test_changelog_031_groups_pairing_and_limits(self):
         text = CHANGELOG.read_text()
         version = (ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "0.3.2")
+        self.assertEqual(version, "0.3.3")
         section = text.split("## 0.3.1\n", 1)[1].split("\n## 0.3.0\n", 1)[0]
         self.assertEqual(section.strip().split("\n\n", 1)[0], PAIRING_LINE)
         self.assertEqual(re.findall(r"(?m)^### (.+)$", section), ["Fixed", "Platforms", "Changed"])

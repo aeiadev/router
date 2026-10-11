@@ -38,7 +38,10 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then base=$(cygpath -m "$base"); fi
           old_tree() {
             mkdir -p "$base/$2"
-            git -C "$1" archive --format=tar "$3" | tar -xf - -C "$base/$2"
+            archive="$base/$2.tar"
+            git -C "$1" archive --format=tar --output="$archive" "$3"
+            tar -xf - -C "$base/$2" < "$archive"
+            rm "$archive"
             echo "$4=$base/$2" >> "$GITHUB_ENV"
           }
           old_tree . router-0.1 36acbafd839886fdff9d7ba7a416d6a8fad13ec5 ROUTER_V01
@@ -91,7 +94,10 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then base=$(cygpath -m "$base"); fi
           old_tree() {
             mkdir -p "$base/$2"
-            git -C "$1" archive --format=tar "$3" | tar -xf - -C "$base/$2"
+            archive="$base/$2.tar"
+            git -C "$1" archive --format=tar --output="$archive" "$3"
+            tar -xf - -C "$base/$2" < "$archive"
+            rm "$archive"
             echo "$4=$base/$2" >> "$GITHUB_ENV"
           }
           old_tree . router-0.1 36acbafd839886fdff9d7ba7a416d6a8fad13ec5 ROUTER_V01

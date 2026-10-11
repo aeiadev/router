@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3
+
+Pairs with Harness 0.3.3.
+
+### Changed
+
+- Materialize historical release archives in CI before extraction to avoid pipe-close failures under `pipefail`.
+
 ## 0.3.2
 
 Pairs with Harness 0.3.2.
