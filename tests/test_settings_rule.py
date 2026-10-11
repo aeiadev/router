@@ -5,7 +5,8 @@ install and uninstall order, the sibling's empty events and folders, and 0.1 and
 The fake sibling installs the way Harness 0.3.0 (02a2dc2) does: its hook block, a private
 .harness-backup-* file and its manifest fields. It uninstalls by the shared rule. No Harness
 checkout, network or model is used. The 0.1 and 0.2 starts need ROUTER_V01 and ROUTER_V02 from
-old-trees.sh; a test that needs one fails when it is unset, it never skips.
+old-trees.sh; a test that needs one fails when it is unset. Under a python3 older than 3.10 the
+old installers run with a verified newer interpreter from PATH, and skip only when there is none.
 """
 import copy
 from datetime import datetime, timezone
@@ -16,18 +17,20 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASH = shutil.which("bash")
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, POSIX_MODES, home_env, posix, posix_modes, python_shim, shim  # noqa: E402
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 HOSTS = (("claude", "settings.json"), ("codex", "hooks.json"))
 PLAIN = b'{\n\t"z": 2,\n\t"a": 1\n}'
 EMPTY_EVENT = b'{\n\t"z": 2,\n\t"hooks": {\n\t\t"SessionStart": []\n\t},\n\t"a": 1\n}'
 MODE = 0o640
-CODEX_NOTES = ("Roles are installed in the global agents directory: {home}/agents\n"
+CODEX_NOTES = ("Roles are installed in the global agents directory: {agents}\n"
                "Alternatively, register a role file with -c agents.<name>.config_file=...\n"
                "As of Codex CLI 0.156, project-level .codex/agents/ may not load under codex exec.\n"
                "Trust the new or changed hooks in Codex before using router. Codex prompts for hook trust on startup.\n")
@@ -46,6 +49,13 @@ def mode_of(path):
     return stat.S_IMODE(path.lstat().st_mode)
 
 
+def assert_file(test, path, data, mode, message=None):
+    """The bytes always; the mode only where the OS has POSIX file modes (NTFS keeps a read-only flag)."""
+    test.assertEqual(path.read_bytes(), data, message)
+    if posix_modes(test, "settings and backup file modes"):
+        test.assertEqual(oct(mode_of(path)), oct(mode), message)
+
+
 def write_private(path, data, mode=0o600):
     """Harness write_bytes: a temporary file in the folder, chmod, then replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,6 +64,15 @@ def write_private(path, data, mode=0o600):
         stream.write(data)
     os.chmod(name, mode)
     os.replace(name, path)
+
+
+import _released_python
+
+RELEASED_PYTHON = []  # one shim folder whose python3 is verified as 3.10 or newer
+
+
+def released_env(env):
+    return _released_python.released_env(env, RELEASED_PYTHON)
 
 
 class FakeHarness:
@@ -195,13 +214,14 @@ class RuleBase(unittest.TestCase):
         self.base = Path(self.temporary.name)
         self.path = self.base / "commands"
         self.path.mkdir()
-        for command in ("python3", "git", "dirname"):
-            (self.path / command).symlink_to(shutil.which(command))
+        python_shim(self.path)
+        for command in ("git", "dirname"):
+            shim(self.path, command, shutil.which(command))
         self.homes = {"claude": self.base / "home/.claude", "codex": self.base / "home/.codex"}
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("ROUTER_", "HARNESS_", "CLAUDE_", "CODEX_", "XDG_"))
                     and key != "ROUTES_JSON"}
-        self.env.update(HOME=str(self.base / "home"), PATH=str(self.path),
+        self.env.update(**home_env(self.base / "home"), PATH=str(self.path),
                         CLAUDE_HOME=str(self.homes["claude"]), CODEX_HOME=str(self.homes["codex"]),
                         XDG_CONFIG_HOME=str(self.base / "config"), XDG_STATE_HOME=str(self.base / "state"),
                         ROUTER_LOCAL="off", PYTHONDONTWRITEBYTECODE="1")
@@ -220,7 +240,8 @@ class RuleBase(unittest.TestCase):
         return {host: set(self.homes[host].glob(dict(HOSTS)[host] + ".router-backup-*")) for host, _ in HOSTS}
 
     def router(self, *options, tree=ROOT):
-        result = subprocess.run([BASH, str(tree / "install.sh"), "--host", "both", *options], env=self.env,
+        env = self.env if tree == ROOT else released_env(self.env)
+        result = subprocess.run([BASH, posix(tree / "install.sh"), "--host", "both", *options], env=env,
                                 text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
@@ -234,12 +255,12 @@ class RuleBase(unittest.TestCase):
         lines = [f"Removed no-longer-shipped: {self.homes[host] / relative}\n" for relative in removed]
         lines += [f"Backed up original settings: {original}\n"] if original else []
         lines += [f"Backed up settings: {path}\n" for path in new if path != original]
-        lines += [f"Made backup private (0600): {path}\n" for path in private]
+        lines += [f"Made backup private (0600): {path}\n" for path in private if POSIX_MODES]  # NTFS: no 0600
         home = self.homes[host]
         lines += [f"Router installed for {host} in {home}\n",
-                  f"Add {home}/router/bin to PATH. Run router status to inspect routing.\n"]
+                  f"Add {home / 'router/bin'} to PATH. Run router status to inspect routing.\n"]
         if host == "codex":
-            lines.append(CODEX_NOTES.format(home=home))
+            lines.append(CODEX_NOTES.format(agents=home / "agents"))
         return "".join(lines), new
 
     def assert_install(self, stdout, before=None, originals=None, private=None, removed=None):
@@ -252,6 +273,8 @@ class RuleBase(unittest.TestCase):
         manifest = self.manifest(host)
         record = {key: manifest.get(key) for key in ("settings_original_existed", "settings_original_sha256",
                                                       "settings_original_mode")}
+        if mode is not None and not posix_modes(self, "recorded settings mode"):
+            record["settings_original_mode"] = mode
         self.assertEqual(record, {"settings_original_existed": existed,
                                   "settings_original_sha256": None if data is None else digest(data),
                                   "settings_original_mode": mode}, host)
@@ -260,7 +283,7 @@ class RuleBase(unittest.TestCase):
             self.assertIsNone(name, host)
             return None
         path = self.homes[host] / name
-        self.assertEqual((path.read_bytes(), mode_of(path)), (data, 0o600), host)
+        assert_file(self, path, data, 0o600, host)
         if backup is not None:
             self.assertEqual(path, backup, host)
         return path
@@ -271,7 +294,7 @@ class RuleBase(unittest.TestCase):
             if data is None:
                 self.assertFalse(path.exists() or path.is_symlink(), f"{host}: settings left behind")
             else:
-                self.assertEqual((path.read_bytes(), oct(mode_of(path))), (data, oct(mode)), host)
+                assert_file(self, path, data, mode, host)
 
     def folders(self):
         return {host: sorted(str(Path(base).relative_to(home)) for base, _, _ in os.walk(home))
@@ -346,8 +369,9 @@ class RecordTheOriginal(RuleBase):
 
     def unreadable(self, path):
         """Mode 000, put back in cleanup so the temporary folder can go."""
-        if os.geteuid() == 0:
-            self.skipTest("root reads mode 000 files")
+        if os.name == "nt" or os.geteuid() == 0:
+            print(f"SKIP {self.id()}: root and NTFS read mode 000 files", file=sys.stderr, flush=True)
+            self.skipTest("root and NTFS read mode 000 files")
         self.addCleanup(os.chmod, path, 0o600)
         os.chmod(path, 0)
 
@@ -419,10 +443,9 @@ class RecordTheOriginal(RuleBase):
         for host, _ in HOSTS:
             new = sorted(self.backups()[host] - before[host])
             self.assertEqual(len(new), 1, host)
-            self.assertEqual((new[0].read_bytes(), mode_of(new[0])), (installed[host], 0o600), host)
+            assert_file(self, new[0], installed[host], 0o600, host)
             expected += f"Backed up settings: {new[0]}\n" + UNINSTALLED
-            self.assertEqual((self.settings(host).read_bytes(), mode_of(self.settings(host))),
-                             (canon(json.loads(PLAIN)), MODE), host)
+            assert_file(self, self.settings(host), canon(json.loads(PLAIN)), MODE, host)
             self.assertFalse((self.homes[host] / "router/install-manifest.json").exists(), host)
         self.assertEqual(out, expected)
 
@@ -437,8 +460,7 @@ class RecordTheOriginal(RuleBase):
         out = self.router("--uninstall")
         for host, _ in HOSTS:
             # The oldest backup holds exactly what is left: its bytes and mode come back.
-            self.assertEqual((self.settings(host).read_bytes(), mode_of(self.settings(host))),
-                             (b'{"hooks":{}}', MODE), host)
+            assert_file(self, self.settings(host), b'{"hooks":{}}', MODE, host)
         self.assertEqual(out, UNINSTALLED * 2)
         # Without that backup the file still existed (had_hooks true): kept as canon.
         self.setUp()
@@ -451,8 +473,7 @@ class RecordTheOriginal(RuleBase):
         for host, _ in HOSTS:
             new = sorted(self.backups()[host])
             self.assertEqual(len(new), 1, host)
-            self.assertEqual((self.settings(host).read_bytes(), mode_of(self.settings(host))),
-                             (canon({"hooks": {}}), MODE), host)
+            assert_file(self, self.settings(host), canon({"hooks": {}}), MODE, host)
         self.assertEqual(out, "".join(f"Backed up settings: {sorted(self.backups()[host])[0]}\n" + UNINSTALLED
                                       for host, _ in HOSTS))
         # A fresh home: nothing says the file existed, so it is unknown and goes.
@@ -514,8 +535,7 @@ class RecordTheOriginal(RuleBase):
             new = sorted(self.backups()[host] - before[host])
             self.assertEqual(len(new), 1, host)
             expected += f"Backed up settings: {new[0]}\n" + UNINSTALLED
-            self.assertEqual((self.settings(host).read_bytes(), mode_of(self.settings(host))),
-                             (canon({"z": 2, "a": 1, "extra": 3}), 0o600), host)  # The mode Harness left.
+            assert_file(self, self.settings(host), canon({"z": 2, "a": 1, "extra": 3}), 0o600, host)  # Harness's mode.
         self.assertEqual(out, expected)
 
     def test_sibling_that_created_the_file_records_it_absent(self):
@@ -532,10 +552,12 @@ class RecordTheOriginal(RuleBase):
         self.seed()
         self.router(tree=self.old_tree(name))
         old = self.backups()
-        old_files = {host: set(self.manifest(host)["files"]) for host, _ in HOSTS}
+        # An old release on Windows wrote its keys with a backslash.
+        old_files = {host: {key.replace("\\", "/") for key in self.manifest(host)["files"]} for host, _ in HOSTS}
         for host, _ in HOSTS:
             self.assertEqual(len(old[host]), 1, f"{name} left no settings backup for {host}")
-            self.assertEqual(mode_of(next(iter(old[host]))), MODE, f"{name} backup lost the settings mode")
+            if posix_modes(self, "old backup mode"):
+                self.assertEqual(mode_of(next(iter(old[host]))), MODE, f"{name} backup lost the settings mode")
         out = self.router()
         removed = {host: sorted(old_files[host] - set(self.manifest(host)["files"])) for host, _ in HOSTS}
         self.assert_install(out, before=old, private={host: sorted(old[host]) for host, _ in HOSTS}, removed=removed)
@@ -588,8 +610,9 @@ class UninstallWithoutRecord(RuleBase):
 
     def unreadable(self, path):
         """Mode 000, put back in cleanup so the temporary folder can go."""
-        if os.geteuid() == 0:
-            self.skipTest("root reads mode 000 files")
+        if os.name == "nt" or os.geteuid() == 0:
+            print(f"SKIP {self.id()}: root and NTFS read mode 000 files", file=sys.stderr, flush=True)
+            self.skipTest("root and NTFS read mode 000 files")
         self.addCleanup(os.chmod, path, 0o600)
         os.chmod(path, 0)
 
@@ -605,10 +628,25 @@ class UninstallWithoutRecord(RuleBase):
                 self.assertEqual(self.router("--uninstall"), UNINSTALLED * 2)
                 self.assert_original(original, MODE)
 
+    def test_router_v01_over_absent_settings_uninstalled_directly_leaves_no_file(self):
+        # D3 with no backup: Router 0.1 created the file, so the current uninstall removes it.
+        self.assert_original(None, None)
+        self.router(tree=self.old_tree("ROUTER_V01"))
+        self.assertEqual(self.backups(), {"claude": set(), "codex": set()})
+        for host, _ in HOSTS:
+            self.assertTrue(self.settings(host).is_file(), host)
+            manifest = self.manifest(host)
+            self.assertFalse({"had_hooks", "settings_original_existed"} & set(manifest), host)
+        self.assertEqual(self.router("--uninstall"), UNINSTALLED * 2)
+        self.assert_original(None, None)
+        for host, _ in HOSTS:
+            self.assertFalse((self.homes[host] / "router/install-manifest.json").exists(), host)
+
     def test_unreadable_legacy_backup_still_means_the_file_existed(self):
         # R-A signal "a legacy backup exists": Router 0.2 over {} recorded no hooks key and no empty events.
-        if os.geteuid() == 0:
-            self.skipTest("root reads mode 000 files")
+        if os.name == "nt" or os.geteuid() == 0:
+            print(f"SKIP {self.id()}: root and NTFS read mode 000 files", file=sys.stderr, flush=True)
+            self.skipTest("root and NTFS read mode 000 files")
         self.seed(b"{}\n")
         self.router(tree=self.old_tree("ROUTER_V02"))
         for host, _ in HOSTS:
@@ -729,7 +767,7 @@ class UninstallRestore(RuleBase):
             self.assertEqual(len(new), 1, host)
             lines += f"Backed up settings: {new[0]}\n" + UNINSTALLED
             path = self.settings(host)
-            self.assertEqual((path.read_bytes(), mode_of(path)), (canon({"z": 2, "a": 1, "later_edit": True}), MODE))
+            assert_file(self, path, canon({"z": 2, "a": 1, "later_edit": True}), MODE)
         self.assertEqual(out, lines)
 
 

@@ -2,19 +2,24 @@
 """Upgrade cleanup, shared-role skew, --purge and backup modes, checked against the released trees.
 
 The released trees come from old-trees.sh (ROUTER_V01, ROUTER_V02, HARNESS_V01, HARNESS_V02).
-A test that needs one fails with a message when it is unset; it never skips.
+A test that needs one fails with a message when it is unset. Those releases need Python 3.10 or
+newer: under an older python3 they run with a newer one from PATH, and skip only when there is none.
 """
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, home_env, posix, posix_modes, python_shim, shim  # noqa: E402
 # host, settings file, agents source in a checkout, role extension
 HOSTS = (("claude", "settings.json", "agents", ".md"), ("codex", "hooks.json", "codex/agents", ".toml"))
 ROLES = ("sweeper", "researcher", "planner", "builder", "builder-in-place",
@@ -38,8 +43,26 @@ def tree_hash(path):
     return digest.hexdigest()
 
 
+def clear_read_only(folder):
+    """Harness 0.2 copies its source files' modes. On NTFS a read-only checkout then leaves files with the
+    read-only flag, which its own uninstall cannot unlink; clear the flag before that old uninstaller runs."""
+    if os.name == "nt":
+        for base, _, names in os.walk(folder):
+            for name in names:
+                os.chmod(os.path.join(base, name), stat.S_IREAD | stat.S_IWRITE)
+
+
 def directories(path):
-    return {str(Path(base).relative_to(path)) for base, _, _ in os.walk(path)}
+    return {Path(base).relative_to(path).as_posix() for base, _, _ in os.walk(path)}  # as the manifest writes them
+
+
+import _released_python
+
+RELEASED_PYTHON = []  # one shim folder whose python3 is verified as 3.10 or newer
+
+
+def released_env(env):
+    return _released_python.released_env(env, RELEASED_PYTHON)
 
 
 class UpgradeBase(unittest.TestCase):
@@ -52,14 +75,15 @@ class UpgradeBase(unittest.TestCase):
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("ROUTER_", "HARNESS_")) and key not in
                     ("CLAUDE_HOME", "CODEX_HOME", "ROUTES_JSON")}
-        self.env.update(HOME=str(self.home), PATH=str(self.path),
+        self.env.update(**home_env(self.home), PATH=str(self.path),
                         XDG_STATE_HOME=str(self.home / ".local/state"),
                         XDG_CONFIG_HOME=str(self.home / ".config"), ROUTER_LOCAL="off",
                         PYTHONDONTWRITEBYTECODE="1")
         self.assertTrue(all(name in self.env for name in ("HOME", "XDG_CONFIG_HOME", "ROUTER_LOCAL")))
-        self.shell = shutil.which("bash")
-        for command in ("python3", "git", "dirname"):
-            (self.path / command).symlink_to(shutil.which(command))
+        self.shell = BASH
+        python_shim(self.path)
+        for command in ("git", "dirname"):
+            shim(self.path, command, shutil.which(command))
 
     def old_tree(self, name):
         value = os.environ.get(name)
@@ -69,8 +93,9 @@ class UpgradeBase(unittest.TestCase):
         return tree
 
     def run_installer(self, tree, *options, expected=0):
-        result = subprocess.run([self.shell, str(tree / "install.sh"), *options],
-                                env=self.env, text=True, capture_output=True,
+        result = subprocess.run([self.shell, posix(tree / "install.sh"), *options],
+                                env=self.env if tree == ROOT else released_env(self.env),
+                                text=True, capture_output=True,
                                 stdin=subprocess.DEVNULL, timeout=60)
         self.assertEqual(result.returncode, expected,
                          f"{tree.name} install.sh {' '.join(options)}:\n{result.stdout}{result.stderr}")
@@ -95,7 +120,8 @@ class UpgradeCleanup(UpgradeBase):
     def check_cleanup(self, name):
         old = self.old_tree(name)
         self.run_installer(old, "--host", "both")
-        before = {host: self.manifest(host)["files"] for host, *_ in HOSTS}
+        # An old release on Windows wrote its keys with a backslash.
+        before = {host: {key.replace("\\", "/") for key in self.manifest(host)["files"]} for host, *_ in HOSTS}
         result = self.install("--host", "both")
         self.assertNotIn("Keeping modified old file", result.stdout)
         for host, _, agents, _ in HOSTS:
@@ -221,6 +247,7 @@ class SharedRoleSkew(UpgradeBase):
             home = self.host_home(host)
             with self.subTest(harness=name, host=host):
                 missing = self.roles(host)[5]  # judge: a claimed role that is absent is written normally
+                (home / missing).chmod(0o600)  # The old Harness left it read-only; NTFS refuses to unlink that.
                 (home / missing).unlink()
                 theirs = {relative: (home / relative).read_bytes() for relative in self.roles(host) if relative != missing}
                 self.assertTrue(any(data != self.checkout_role(host, relative) for relative, data in theirs.items()),
@@ -239,8 +266,8 @@ class SharedRoleSkew(UpgradeBase):
                 self.install("--host", host)
                 sibling_path = home / "harness/install-manifest.json"
                 sibling = json.loads(sibling_path.read_text())
-                for relative in self.roles(host):
-                    sibling["files"].pop(relative)
+                for relative in self.roles(host):  # Harness 0.1 and 0.2 on Windows keyed them with a backslash.
+                    sibling["files"].pop(relative if relative in sibling["files"] else relative.replace("/", "\\"))
                 sibling_path.write_text(json.dumps(sibling))
                 result = self.install("--host", host)
                 self.assertNotIn("shared roles come from", result.stdout)
@@ -334,11 +361,14 @@ class SharedRoleDeadlock(UpgradeBase):
         result = self.install("--host", "both")
         notice = "shared roles come from Harness 0.3.0; upgrade it for the 0.3 roles\n"
         self.assertEqual(result.stdout, self.installed({host: notice for host, *_ in HOSTS}))
+        # Harness 0.3.0 is older than this checkout (0.3.1 pairs only with 0.3.1): every role it
+        # claims keeps its bytes, the edited one included; none is lost or half written.
+        checkout = tuple(int(part) for part in (ROOT / "VERSION").read_text().strip().split("."))
+        self.assertLess((0, 3, 0), checkout)
         for host, *_ in HOSTS:
-            for relative, data in self.role_bytes(host).items():
-                expected = (self.old_roles[host][relative] + b"\n# mine\n" if relative == edited[host] else
-                            self.checkout_role(host, relative))
-                self.assertEqual(data, expected, relative)
+            kept = {relative: data + b"\n# mine\n" if relative == edited[host] else data
+                    for relative, data in self.old_roles[host].items()}
+            self.assertEqual(self.role_bytes(host), kept)
 
     def test_stale_record_leaves_no_stray_once_the_sibling_is_gone(self):
         for host, *_ in HOSTS:
@@ -478,7 +508,8 @@ class BackupModes(UpgradeBase):
 
     def assert_private(self, paths):
         for path in paths:
-            self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o600), f"backup is not 0600: {path}")
+            if posix_modes(self, "backup mode"):
+                self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o600), f"backup is not 0600: {path}")
 
     def test_every_backup_is_0600_and_exact_restore_keeps_the_original_mode(self):
         originals = self.seed()
@@ -490,7 +521,8 @@ class BackupModes(UpgradeBase):
             path = self.host_home(host) / filename
             with self.subTest(host=host):
                 self.assertEqual(path.read_bytes(), originals[host], "exact-bytes restore failed")
-                self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o644), "restore took the backup's mode")
+                if posix_modes(self, "restored settings mode"):
+                    self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o644), "restore took the backup's mode")
 
     def test_uninstall_backup_of_an_edited_file_is_0600(self):
         self.seed()
@@ -520,12 +552,16 @@ class BackupModes(UpgradeBase):
                 manifest = self.manifest(host)
                 self.assertEqual(len(old[host]), 1, f"{name} {host}")
                 self.assertEqual([manifest.get(key) for key in ("settings_original_existed", "settings_original_backup",
-                                                                 "settings_original_sha256", "settings_original_mode")],
-                                 [True, old[host][0].name, hashlib.sha256(original).hexdigest(), 0o644], f"{name} {host}")
+                                                                 "settings_original_sha256")],
+                                 [True, old[host][0].name, hashlib.sha256(original).hexdigest()], f"{name} {host}")
+                if posix_modes(self, "recorded settings mode"):
+                    self.assertEqual(manifest.get("settings_original_mode"), 0o644, f"{name} {host}")
         self.install("--host", "both", "--uninstall")
         for host, filename, *_ in HOSTS:
             path = self.host_home(host) / filename
-            self.assertEqual((path.read_bytes(), oct(path.stat().st_mode & 0o777)), (original, oct(0o644)), f"{name} {host}")
+            self.assertEqual(path.read_bytes(), original, f"{name} {host}")
+            if posix_modes(self, "restored settings mode"):
+                self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o644), f"{name} {host}")
 
     def test_upgrade_over_v01_manifest_records_its_backup(self):
         self.check_old_original("ROUTER_V01")
@@ -562,6 +598,7 @@ class OldInstallFolders(UpgradeBase):
         before = directories(self.home)
         self.run_installer(self.old_tree("HARNESS_V02"), "--host", "both")
         self.install("--host", "both")
+        clear_read_only(self.home)
         self.run_installer(self.old_tree("HARNESS_V02"), "--host", "both", "--uninstall")
         self.install("--host", "both", "--uninstall")
         # Only the host homes stay, holding the preserved settings backups; no skills/ or other folder.

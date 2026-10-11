@@ -123,6 +123,7 @@ class LedgerTests(unittest.TestCase):
                          "a relative XDG_STATE_HOME must be ignored")
         self.assertFalse(home.exists(), "path resolution created directories")
 
+    @unittest.skipIf(os.name == "nt", "NTFS keeps no POSIX modes (stated limit)")
     def test_spawn_creates_private_file_and_directory_under_a_permissive_umask(self):
         previous = os.umask(0o000)
         try:
@@ -134,6 +135,7 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700, "state directory mode")
         self.assertEqual(stat.S_IMODE(self.db.stat().st_mode), 0o600, "ledger file mode")
 
+    @unittest.skipIf(os.name == "nt", "NTFS keeps no POSIX modes (stated limit)")
     def test_existing_modes_are_tightened_and_symlink_target_is_untouched(self):
         self.state.mkdir(mode=0o755)
         with contextlib.closing(ledger.connect(self.db)):
@@ -152,6 +154,7 @@ class LedgerTests(unittest.TestCase):
             pass
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
 
+    @unittest.skipIf(os.name == "nt", "NTFS keeps no POSIX modes (stated limit)")
     def test_existing_sidecars_and_spool_are_tightened(self):
         with contextlib.closing(ledger.connect(self.db)):
             pass
@@ -244,7 +247,7 @@ class LedgerTests(unittest.TestCase):
         spool.write_text('{"op":"verdict"}\n' * 100)
         ledger._spool(self.db, {"op": "verdict", "key": "c:key"})
         self.assertEqual(len(spool.read_text().splitlines()), 100)
-        self.assertIn(str(spool), (self.state / "errors.jsonl").read_text())
+        self.assertIn(json.dumps(str(spool))[1:-1], (self.state / "errors.jsonl").read_text())
 
     def spool_one(self, key="c:key"):
         with contextlib.closing(ledger.connect(self.db)):
@@ -319,7 +322,7 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), before)
         self.assertTrue(link.is_symlink())
         self.assertEqual(len(self.errors_log().splitlines()), 1)
-        self.assertIn(str(link), self.errors_log())
+        self.assertIn(json.dumps(str(link))[1:-1], self.errors_log())
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo is missing on this platform")
     def test_special_replay_claims_do_not_block_verdict(self):
@@ -371,6 +374,41 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.errors_log(), "")
         self.assertEqual(self.claims(), [])
 
+    def test_claim_swapped_between_lstat_and_open_is_refused_unread(self):
+        # _read_claim checked the original claim; by the time it is open, another file holds the name.
+        self.state.mkdir()
+        claim = self.state / ("ledger.spool.replay." + "cd" * 16)
+        moved, replacement = self.state / "original-claim", self.state / "replacement-claim"
+        claim.write_bytes(b"original sentinel\n")
+        replacement.write_bytes(b"replacement sentinel\n")
+        real_open, real_read = ledger.compat.open_fd, os.read
+        opened, reads = [], []
+
+        def swap_then_open(path, *args, **kwargs):
+            if Path(path) != claim:
+                return real_open(path, *args, **kwargs)
+            os.replace(claim, moved)
+            os.replace(replacement, claim)
+            fd = real_open(moved, *args, **kwargs)  # the descriptor still points at the checked file
+            opened.append(fd)
+            return fd
+
+        def read(fd, *args):
+            if fd in opened:
+                reads.append(fd)
+            return real_read(fd, *args)
+
+        with patch.object(ledger.compat, "open_fd", swap_then_open), patch.object(ledger.os, "read", read):
+            with self.assertRaises(OSError) as caught:
+                ledger._read_claim(claim)
+        self.assertEqual(str(caught.exception), "claim path changed while opening")
+        self.assertEqual((len(opened), reads), (1, []))
+        with self.assertRaises(OSError):
+            os.fstat(opened[0])
+        identity = lambda path: (os.stat(path).st_dev, os.stat(path).st_ino)
+        self.assertNotEqual(identity(moved), identity(claim))
+        self.assertEqual((moved.read_bytes(), claim.read_bytes()), (b"original sentinel\n", b"replacement sentinel\n"))
+
     def test_spool_full_logs_once_for_three_writes(self):
         with contextlib.closing(ledger.connect(self.db)):
             pass
@@ -381,7 +419,7 @@ class LedgerTests(unittest.TestCase):
         lines = self.errors_log().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertRegex(lines[0], r'.*"action": ?"spool".*')
-        self.assertIn(str(spool), lines[0])
+        self.assertIn(json.dumps(str(spool))[1:-1], lines[0])
         self.assertEqual(len(spool.read_text().splitlines()), 100)
 
     def unsafe_spool_costs_one_line(self, make):
@@ -421,7 +459,8 @@ class LedgerTests(unittest.TestCase):
         for spool in self.unsafe_spool_costs_one_line(make):
             target = spool.parent.parent / (spool.parent.name + "-target.txt")
             self.assertTrue(spool.is_symlink())
-            self.assertEqual((target.read_bytes(), stat.S_IMODE(target.stat().st_mode)), (b"keep\n", 0o644))
+            self.assertEqual((target.read_bytes(), os.name == "nt" or stat.S_IMODE(target.stat().st_mode)),
+                             (b"keep\n", os.name == "nt" or 0o644))
 
     def test_dangling_symlink_spool_costs_one_line_and_creates_nothing(self):
         def make(spool):
@@ -437,8 +476,8 @@ class LedgerTests(unittest.TestCase):
             spool.chmod(0o755)
             return spool
         for spool in self.unsafe_spool_costs_one_line(make):
-            self.assertEqual((spool.is_dir(), stat.S_IMODE(spool.stat().st_mode), list(spool.iterdir())),
-                             (True, 0o755, []))
+            self.assertEqual((spool.is_dir(), os.name == "nt" or stat.S_IMODE(spool.stat().st_mode), list(spool.iterdir())),
+                             (True, os.name == "nt" or 0o755, []))
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo is missing on this platform")
     def test_fifo_spool_costs_one_line_and_never_blocks(self):
@@ -485,7 +524,7 @@ class LedgerTests(unittest.TestCase):
         conn.close()
         result = self.hook()
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
-        self.assertIn(str(self.db), (self.state / "errors.jsonl").read_text(encoding="utf-8"))
+        self.assertIn(json.dumps(str(self.db))[1:-1], (self.state / "errors.jsonl").read_text(encoding="utf-8"))
 
     def test_existing_attempts_database_is_left_byte_identical(self):
         self.state.mkdir(mode=0o700)

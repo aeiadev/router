@@ -24,6 +24,7 @@ from pathlib import Path
 
 import common
 
+compat = common.compat
 FILE_NAME = "ledger.sqlite3"
 PRUNE_STAMP = "ledger.pruned"  # mtime = last prune; the C3 tables stay exactly as listed
 SCHEMA_VERSION = 1
@@ -32,6 +33,7 @@ HOOK_BUSY_SECONDS = 2.0
 SPOOL_NAME = "ledger.spool"
 SPOOL_MAX_BYTES = 64 * 1024
 SPOOL_MAX_LINES = 100
+SPOOL_LOCK_SECONDS = 2.0  # writers and replay share <spool>.lock; past this a hook skips its turn
 DAY = 86400
 RETENTION = (("lanes", "started", 7), ("attempts", "ts", 30), ("verdicts", "ts", 90))  # days
 LANE_STATUSES = ("running", "returned", "judged")
@@ -69,18 +71,19 @@ _MODE_WARNED = set()  # str(path) for mode lines; (str(spool), "busy" | "full" |
 
 
 def _private_mode(path, mode):
-    """Tighten only owned, nonsymlink paths, without following a replacement symlink."""
+    """Tighten only owned, nonsymlink paths, without following a replacement symlink. Where there is
+    no POSIX mode support (Windows) the profile ACLs stand in and nothing is opened."""
     try:
         info = os.lstat(path)
-        if info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode):
+        if not compat.owned(info) or stat.S_ISLNK(info.st_mode):
             raise OSError("unowned or symlinked path")
-        if stat.S_IMODE(info.st_mode) != mode:
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        if stat.S_IMODE(info.st_mode) != mode and compat.CAN_FCHMOD:
+            flags = compat.READ_FLAGS
             if stat.S_ISDIR(info.st_mode):
-                flags |= getattr(os, "O_DIRECTORY", 0)
-            fd = os.open(path, flags)
+                flags |= compat.DIRECTORY
+            fd = compat.open_fd(path, flags)
             try:
-                os.fchmod(fd, mode)
+                compat.set_private(fd, mode)
             finally:
                 os.close(fd)
     except (OSError, ValueError) as exc:
@@ -94,7 +97,7 @@ def _private_file(path: Path) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     _private_mode(path.parent, 0o700)
     try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fd = compat.open_fd(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         pass
     else:
@@ -154,6 +157,12 @@ def _spool_path(path):
     return Path(path).with_name(SPOOL_NAME)
 
 
+def _spool_lock(spool):
+    """The lock file beside the spool. The spool itself is never locked, so replay can rename it
+    once closed (Windows cannot rename an open file)."""
+    return spool.with_name(spool.name + ".lock")
+
+
 def _unsafe_spool(spool, action=None):
     """True when the spool path holds anything but a regular file owned by the caller (a symlink,
     directory, fifo or foreign file). Callers then leave it unopened. With an action, log one line
@@ -164,7 +173,7 @@ def _unsafe_spool(spool, action=None):
         return False
     except OSError:
         info = None
-    if info is not None and info.st_uid == os.geteuid() and stat.S_ISREG(info.st_mode):
+    if info is not None and compat.owned(info) and stat.S_ISREG(info.st_mode):
         return False
     if action is not None and (str(spool), "unsafe") not in _MODE_WARNED:
         _MODE_WARNED.add((str(spool), "unsafe"))
@@ -176,33 +185,25 @@ def _spool(path, item):
     spool = _spool_path(path)
     line = (json.dumps(item, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
     try:
-        import fcntl
-        for _ in range(5):
+        with compat.locked(_spool_lock(spool), SPOOL_LOCK_SECONDS):
             if _unsafe_spool(spool, "spool"):
                 return
-            fd = os.open(spool, os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            fd = compat.open_fd(spool, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
                 opened = os.fstat(fd)
-                try:
-                    current = os.stat(spool, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-                    continue
-                if opened.st_uid != os.geteuid() or not stat.S_ISREG(opened.st_mode):
+                if not compat.owned(opened) or not stat.S_ISREG(opened.st_mode):
                     raise OSError("unowned or special spool path")
-                os.fchmod(fd, 0o600)
-                lines = os.pread(fd, SPOOL_MAX_BYTES + 1, 0).count(b"\n")
+                compat.set_private(fd, 0o600)
+                lines = compat.pread(fd, SPOOL_MAX_BYTES + 1, 0).count(b"\n")
                 if opened.st_size + len(line) > SPOOL_MAX_BYTES or lines >= SPOOL_MAX_LINES:
                     if (str(spool), "full") not in _MODE_WARNED:
                         _MODE_WARNED.add((str(spool), "full"))
                         _failed(spool, LedgerError("spool full"), "spool")
                 else:
                     os.write(fd, line)
-                return
             finally:
                 os.close(fd)
+    except compat.LockTimeout:
         if (str(spool), "busy") not in _MODE_WARNED:
             _MODE_WARNED.add((str(spool), "busy"))
             _failed(spool, LedgerError("spool busy"), "spool")
@@ -224,10 +225,10 @@ def _read_claim(claim):
         info = os.lstat(claim)
     except FileNotFoundError:
         return None
-    if info.st_uid != os.geteuid() or not stat.S_ISREG(info.st_mode):
+    if not compat.owned(info) or not stat.S_ISREG(info.st_mode):
         raise OSError("unowned, symlinked or special claim file")
     try:
-        fd = os.open(claim, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = compat.open_fd(claim)
     except FileNotFoundError:
         return None
     try:
@@ -235,7 +236,7 @@ def _read_claim(claim):
         current = os.stat(claim, follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
             raise OSError("claim path changed while opening")
-        if opened.st_uid != os.geteuid() or not stat.S_ISREG(opened.st_mode):
+        if not compat.owned(opened) or not stat.S_ISREG(opened.st_mode):
             raise OSError("unowned or special claim file")
         return os.read(fd, SPOOL_MAX_BYTES + 1)
     finally:
@@ -249,30 +250,24 @@ def _replay(conn, path):
     if not spool.exists() and not spool.is_symlink() and not any(
             item.exists() or item.is_symlink() for item in _claim_files(spool)):
         return
-    # Claim and read under the spool inode lock, before waiting for SQLite. An unsafe spool path
-    # costs one log line; the database and any valid claim files are still applied.
-    unsafe = _unsafe_spool(spool, "replay")
-    try:
-        fd = None if unsafe else os.open(spool, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-    except FileNotFoundError:
-        fd = None
-    if fd is not None:
+    # Claim under the spool lock, before waiting for SQLite: no writer has the spool open then, so
+    # the rename works on Windows too. A held lock skips the claim (the next hook takes it). An
+    # unsafe spool path costs one log line; the database and any valid claim files still apply.
+    if not _unsafe_spool(spool, "replay") and (spool.exists() or spool.is_symlink()):
         try:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            opened = os.fstat(fd)
-            try:
-                current = os.stat(spool, follow_symlinks=False)
-            except FileNotFoundError:
-                current = None
-            if current and (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino):
-                if opened.st_uid != os.geteuid() or not stat.S_ISREG(opened.st_mode):
-                    raise OSError("unowned or special spool path")
-                claim = spool.with_name(f"{spool.name}.replay.{uuid.uuid4().hex}")
-                os.rename(spool, claim)
-                _read_claim(claim)
-        finally:
-            os.close(fd)
+            with compat.locked(_spool_lock(spool), SPOOL_LOCK_SECONDS):
+                try:
+                    current = os.lstat(spool)
+                except FileNotFoundError:
+                    current = None
+                if current is not None:
+                    if not compat.owned(current) or not stat.S_ISREG(current.st_mode):
+                        raise OSError("unowned or special spool path")
+                    claim = spool.with_name(f"{spool.name}.replay.{uuid.uuid4().hex}")
+                    compat.replace(spool, claim)
+                    _read_claim(claim)
+        except compat.LockTimeout:
+            pass
     conn.execute("BEGIN IMMEDIATE")
     try:
         claims = [item for item in _claim_files(spool) if item.exists() or item.is_symlink()]
@@ -665,7 +660,7 @@ def maybe_prune(conn, now=None) -> bool:
     if last is not None and 0 <= now - last < DAY:
         return False
     prune(conn, now)
-    os.close(os.open(stamp, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600))
+    os.close(compat.open_fd(stamp, os.O_WRONLY | os.O_CREAT, 0o600))
     os.utime(stamp, (now, now))
     return True
 

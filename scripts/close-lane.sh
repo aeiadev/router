@@ -16,7 +16,16 @@ if [[ $# -ne 2 ]]; then
   echo 'Usage: close-lane.sh <worktree> <brief-file>' >&2
   exit 2
 fi
-exec python3 - "$@" <<'PY'
+# pyrun.sh (beside the hooks in a checkout or an install) finds Python 3.9+, never the Store stub.
+here=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+for pyrun in "$here/../hooks/router/pyrun.sh" "$here/../../hooks/router/pyrun.sh" ""; do
+  [[ -z $pyrun || -f $pyrun ]] && break
+done
+[[ -n $pyrun ]] || { echo 'close-lane: pyrun.sh not found; reinstall Router' >&2; exit 1; }
+# BAR runs in this same bash: from native Windows Python a bare "bash" is System32's WSL bash.
+shell=$BASH
+if command -v cygpath >/dev/null 2>&1; then shell=$(cygpath -w "$BASH"); fi
+exec sh "$pyrun" router warn - "$shell" "$@" <<'PY'
 import fnmatch
 import math
 import os
@@ -70,8 +79,9 @@ def check_scope():
 
 
 try:
-    worktree = Path(sys.argv[1]).resolve(strict=True)
-    text = Path(sys.argv[2]).read_text(encoding="utf-8")
+    shell = sys.argv[1]
+    worktree = Path(sys.argv[2]).resolve(strict=True)
+    text = Path(sys.argv[3]).read_text(encoding="utf-8")
     fields = {}
     required = {"TASK", "FILES", "BAR", "RETURN"}
     for line in text.splitlines():
@@ -110,13 +120,19 @@ try:
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("CLOSE_LANE_BAR_TIMEOUT must be a positive number")
     check_scope()
-    process = subprocess.Popen(["bash", "-euo", "pipefail", "-c", fields["BAR"]],
+    process = subprocess.Popen([shell, "-euo", "pipefail", "-c", fields["BAR"]],
                                cwd=worktree, stdin=subprocess.DEVNULL,
                                stdout=sys.stderr, stderr=sys.stderr, start_new_session=True)
     try:
         code = process.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+        if os.name == "nt":
+            # Windows has no process groups: taskkill /T ends the BAR and what it started.
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         fail(f"BAR timed out after {seconds:g}s")
     if code:

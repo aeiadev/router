@@ -25,7 +25,7 @@ def path_for(session_id):
     if not isinstance(session_id, str) or not session_id:
         return None
     xdg = os.environ.get("XDG_STATE_HOME", "")
-    base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local/state"
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else common.compat.home() / ".local/state"
     digest = hashlib.sha256(session_id.encode("utf-8", "surrogatepass")).hexdigest()[:16]
     return base / "claude-harness" / "pressure" / (digest + ".json")
 
@@ -53,7 +53,7 @@ def read(session_id, host, now=None):
         for directory in (path.parent, path.parent.parent):
             if directory.exists() and not directory.stat().st_mode & 0o111:
                 raise PermissionError("unsearchable directory")
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as stream:
+        with os.fdopen(common.compat.open_fd(path), "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError("not a regular file")

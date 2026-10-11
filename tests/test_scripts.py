@@ -10,6 +10,8 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, posix, run  # noqa: E402
 SCRIPTS = ROOT / "scripts"
 
 
@@ -28,10 +30,10 @@ class ScriptTests(unittest.TestCase):
                 self.env.pop(key)
 
     def run_script(self, name, *arguments, env=None):
-        interpreter = "bash" if name.endswith(".sh") else sys.executable
-        return subprocess.run([interpreter, str(SCRIPTS / name), *map(str, arguments)],
-                              env=env or self.env, cwd=ROOT, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=10)
+        command = [BASH, posix(SCRIPTS / name)] if name.endswith(".sh") else [sys.executable, str(SCRIPTS / name)]
+        # run() kills the whole tree at the deadline: a stuck grandchild cannot hold the pipes open.
+        return run([*command, *map(str, arguments)], timeout=10, env=env or self.env, cwd=ROOT,
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True)
 
     def assert_code(self, result, code):
         self.assertEqual(result.returncode, code,
@@ -73,6 +75,36 @@ class ScriptTests(unittest.TestCase):
         self.assert_code(self.run_script("wait-until.sh", "1", "pid", process.pid), 0)
         self.assert_code(self.run_script("wait-until.sh", "1", "no-proc", "router_missing_process_marker"), 0)
 
+    def test_wait_follows_a_background_job_of_the_shell(self):
+        # Git Bash's $! is an MSYS pid; Python on Windows knows the process by another (Windows) pid.
+        script = ('sleep 30 >/dev/null 2>&1 </dev/null & job=$!\n'
+                  '"$BASH" "$1" 0.5 pid "$job"; echo "pid rc=$?"\n'
+                  '"$BASH" "$1" 0.5 exists "$2" --alive "$job"; echo "alive rc=$?"\n'
+                  'kill -0 "$job" && echo "sleeper alive"\n'
+                  'kill "$job"\n')
+        result = run([BASH, "-c", script, "job", posix(SCRIPTS / "wait-until.sh"), posix(self.tmp / "missing")],
+                     timeout=30, env=self.env, cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.assertEqual(result.stdout.split("\n")[:3], ["pid rc=124", "alive rc=124", "sleeper alive"],
+                         f"stderr={result.stderr!r}")
+
+    def test_wait_leaves_the_watched_process_running(self):
+        # Windows os.kill(pid, 0) sends CTRL_C_EVENT to the process group pid: a probe must not stop what it
+        # watches. The child leads its own group with Ctrl+C on, so such a probe would end it.
+        marker = f"router_wait_marker_{os.getpid()}"
+        code, flags = "import time; time.sleep(30)", 0
+        if os.name == "nt":
+            code = "import ctypes, time; ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False); time.sleep(30)"
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        child = subprocess.Popen([sys.executable, "-c", code, marker], stdin=subprocess.DEVNULL, creationflags=flags)
+        self.addCleanup(child.wait, 10)
+        self.addCleanup(child.kill)
+        # no-proc matches the command line, not just the program name (python.exe on Windows).
+        for arguments in (("pid", child.pid), ("exists", self.tmp / "missing", "--alive", child.pid),
+                          ("no-proc", marker)):
+            with self.subTest(mode=arguments[0]):
+                self.assert_code(self.run_script("wait-until.sh", "0.5", *arguments), 124)
+                self.assertIsNone(child.poll(), "the wait stopped the process it was watching")
+
     def git(self, *arguments):
         result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(self.repo),
                                  *arguments], env=self.env, stdin=subprocess.DEVNULL,
@@ -109,6 +141,19 @@ class ScriptTests(unittest.TestCase):
         (self.repo / "new file.txt").write_text("new\n")
         self.write_brief(files='allowed.txt "new file.txt"')
         result = self.close()
+        self.assert_code(result, 0)
+        self.assertTrue(result.stdout.startswith("PASS "), result.stdout)
+
+    def test_close_lane_runs_bar_in_its_own_bash(self):
+        # Native Windows Python resolves a bare "bash" to System32's WSL bash, which hangs: the BAR runs
+        # in the bash that runs close-lane.sh, whatever "bash" PATH names first.
+        self.make_repo()
+        decoy = self.tmp / "decoy"
+        decoy.mkdir()
+        (decoy / "bash").write_bytes(b"#!/bin/sh\nexit 97\n")
+        os.chmod(decoy / "bash", 0o755)
+        env = dict(self.env, PATH=str(decoy) + os.pathsep + self.env.get("PATH", ""))
+        result = self.run_script("close-lane.sh", self.repo, self.brief, env=env)
         self.assert_code(result, 0)
         self.assertTrue(result.stdout.startswith("PASS "), result.stdout)
 

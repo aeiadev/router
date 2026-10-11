@@ -5,13 +5,27 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, home_env, posix  # noqa: E402
 README = ROOT / "README.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
+
+
+def retired_source_paths(root=ROOT):
+    """Source files owned by Router; CI may put a Harness checkout below this root."""
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if relative.parts[0] in {".git", "harness"} or path == root / "CHANGELOG.md":
+            continue
+        if path.is_file() and path.suffix in (".md", ".py", ".sh"):
+            yield path
 
 # The text Harness copies byte for byte. Edit it here and in README.md together.
 SHARED_BLOCK = r'''
@@ -49,20 +63,63 @@ In Claude Code, `/plugin marketplace add aeiadev/router`, then `/plugin install 
 '''
 
 
+# 0.3.1: the one platform table, every stated limit and the release pairing rule. Each line is
+# matched whole, so deleting or rewording one goes red. Edit README.md or CHANGELOG.md with it.
+PLATFORM_TABLE = (
+    "| Platform | Claude Code | Codex CLI | Requirements |",
+    "| --- | --- | --- | --- |",
+    "| Linux | Hooks start with `sh` | Hooks start with `sh` | Bash 3.2+, Python 3.9+, Git |",
+    "| Stock macOS | Hooks start with `sh` | Hooks start with `sh` | System Bash 3.2, `/usr/bin/python3` 3.9, Git |",
+    "| Native Windows | Hooks run in Git Bash | Hooks run in PowerShell through `command_windows` | Git for Windows; Python 3.9+ as `python3`, `python` or `py -3` |",
+    "| WSL | As Linux, inside WSL | As Linux, inside WSL | As Linux; separate from a native Windows install |",
+)
+README_LIMITS = (
+    "- POSIX owner checks and permission bits such as 0600 and 0700 are not enforced on native Windows (NTFS keeps no POSIX modes), and the installer skips chmod there. Use Windows account and folder permissions to control access. File-mode statements elsewhere in this README apply to Linux, macOS and WSL.",
+    "- Where the account cannot create symlinks (Windows without Developer Mode), the installer copies Router's internal links instead. The manifest records each copy by sha256, and upgrade and uninstall handle copies and links alike.",
+    "- Codex runs hooks on native Windows in PowerShell through `command_windows`, with the Python that ran `install.sh`. If that Python is removed, the hook prints `router: Python missing; rerun install.sh` and exits 1; rerun `install.sh` after moving or replacing Python.",
+    "- The Microsoft Store `python3` stub never counts as Python. With no real Python, Router prints the missing-Python line above instead of failing silently.",
+    "- Use Windows-valid file names without control characters; names that Windows cannot create are outside native Windows support.",
+    "- Keep installation, state and backup paths below the usual 260-character MAX_PATH limit, including the files created beneath them; longer paths are outside native Windows support.",
+    "- Native Windows support starts with 0.3.1. Upgrade both Router and Harness to 0.3.1 before uninstalling either: a 0.2 uninstaller predates Windows support and can misread the current sibling's manifest keys.",
+    "- Upgrading alongside Harness 0.2 on native Windows is not supported: Harness 0.2 claims no shared roles there, so Router refreshes them without the older-sibling notice.",
+    "`ROUTER_STATE` or `XDG_STATE_HOME` written as `~user/...` needs `ROUTER_PYTHON` or a Python 3.9 or newer on PATH to resolve that account. On native Windows, a `~/` path whose rest starts with another separator or a drive, such as `~//tmp` or `~/C:state`, may need one too. If the saved interpreter is reachable only through such a path and no Python is found, the missing-Python line applies. Absolute paths, drive and UNC paths, and ordinary `~/` paths start from the saved interpreter.",
+    "Router picks the pressure host from `harness_host` first, then an explicit `--host` argument, and only then treats an event that carries `turn_id` as Codex; live Codex visibility of pressure nudges remains unverified.",
+    "Native Windows test runs skip POSIX owner and mode assertions and chmod-based unreadable-file fixtures; checks of file contents, copy lifecycles and injected errors still run. Where the account cannot create symlinks, symlink assertions are skipped and the copy fallback stays tested. FIFO fixtures need `os.mkfifo`, which Windows Python lacks. The system-Bash release-notes check runs only when `/bin/bash` is older than 4. The Windows simulation self-check runs only under `PYTHONPATH=tests/win_sim`. Tests that start the 0.1 or 0.2 installers need Python 3.10 or newer (a stock Mac has 3.9) and skip only those cases when none is on PATH; on native Windows, the cases where an old 0.2 uninstaller runs first are skipped.",
+)
+PAIRING_LINE = ("Pairs with Harness 0.3.1. If the installed Harness is older, the installer prints one "
+                "upgrade notice; upgrade both tools.")
+CHANGELOG_LIMITS = (
+    "- Not enforced on native Windows: POSIX owner checks and file modes such as 0600 (NTFS keeps none); the installer skips chmod there.",
+    "- Codex hooks on native Windows run the Python that ran `install.sh`; after moving or replacing it, rerun `install.sh`.",
+    "- Control-character file names and paths beyond the 260-character MAX_PATH are outside native Windows support.",
+    "- State paths written as `~user/...`, and on native Windows a `~/` path such as `~//tmp` or `~/C:state`, may need `ROUTER_PYTHON` or a Python on PATH; they cannot start from the saved interpreter alone.",
+    "- On native Windows, upgrade both tools to 0.3.1 before uninstalling: a 0.2 uninstaller can misread current manifest keys. Upgrading alongside Harness 0.2 there is not supported.",
+)
+
+
+import _released_python
+
+RELEASED_PYTHON = []  # one shim folder whose python3 is verified as 3.10 or newer
+
+
+def released_env(env):
+    return _released_python.released_env(env, RELEASED_PYTHON)
+
+
 class DocsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         home = Path(self.tmp.name)
-        self.env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"),
+        self.env = {**os.environ, **home_env(home), "XDG_CONFIG_HOME": str(home / "config"),
                     "XDG_STATE_HOME": str(home / "state"), "CLAUDE_HOME": str(home / "claude"),
                     "CODEX_HOME": str(home / "codex"),
                     "ROUTER_LOCAL": str(home / "config/router/routes.local.json"),
                     "PYTHONDONTWRITEBYTECODE": "1", "PATH": str(ROOT / "bin") + os.pathsep + os.environ["PATH"]}
         self.readme = README.read_text()
 
-    def run_cmd(self, command, cwd=ROOT):
-        return subprocess.run(command, cwd=cwd, env=self.env, text=True, capture_output=True, timeout=60)
+    def run_cmd(self, command, cwd=ROOT, env=None):
+        return subprocess.run(command, cwd=cwd, env=env or self.env, text=True, capture_output=True, timeout=60)
 
     def test_result_first_and_demo(self):
         body = self.readme.split("# Router\n", 1)[1].lstrip()
@@ -71,7 +128,7 @@ class DocsTests(unittest.TestCase):
         self.assertNotRegex(first.lower(), r"hook|sqlite|install\.sh")
         self.assertRegex(self.readme, r"(?s)## Demo\n.*brief: BAR missing \(builder needs TASK, FILES, BAR, RETURN in that order\).*router lanes.*router report.*router doctor")
         overlay = Path(self.env["ROUTER_LOCAL"]); overlay.parent.mkdir(parents=True); overlay.write_text("{}")
-        installed = self.run_cmd(["bash", str(ROOT / "install.sh"), "--host", "both"])
+        installed = self.run_cmd([BASH, posix(ROOT / "install.sh"), "--host", "both"])
         self.assertEqual(installed.returncode, 0, installed.stderr)
         outputs = []
         for match in re.finditer(r"(?m)^```bash\n(.*?)^```", self.readme, re.S | re.M):
@@ -80,7 +137,7 @@ class DocsTests(unittest.TestCase):
                 continue
             commands = [line for line in match.group(1).splitlines() if line and not line.startswith("#")]
             for command in commands:
-                result = self.run_cmd(["bash", "-c", command])
+                result = self.run_cmd([BASH, "-c", command])
                 self.assertEqual(result.returncode, 0, (command, result.stderr))
                 outputs.append(result.stdout)
         for line in ("no lanes", "codex lanes: 0 (no verdicts on Codex)", "[ok] spawn: dry run allowed a sweeper brief"):
@@ -161,20 +218,72 @@ class DocsTests(unittest.TestCase):
 
     def test_dispatch_log_retired(self):
         self.assertFalse((ROOT / ("scripts/dispatch" + "-log.py")).exists())
-        for path in ROOT.rglob("*"):
-            if path.is_file() and ".git" not in path.parts and path != CHANGELOG and path != Path(__file__):
-                if path.suffix in (".md", ".py", ".sh"):
-                    self.assertNotIn("dispatch" + "-log", path.read_text(errors="replace"), str(path))
-        result = self.run_cmd(["bash", str(ROOT / "install.sh"), "--host", "claude"])
+        for path in retired_source_paths():
+            if path != Path(__file__):
+                if "dispatch" + "-log" in path.read_text(errors="replace"):
+                    self.fail(f"retired helper mentioned in {path}")
+        result = self.run_cmd([BASH, posix(ROOT / "install.sh"), "--host", "claude"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((Path(self.tmp.name) / ("claude/router/bin/dispatch" + "-log.py")).exists())
         old = os.environ.get("ROUTER_V02")
         self.assertIsNotNone(old, "ROUTER_V02 must be set from old-trees.sh")
-        result = self.run_cmd(["bash", str(Path(old) / "install.sh"), "--host", "codex"])
+        result = self.run_cmd([BASH, posix(Path(old) / "install.sh"), "--host", "codex"], env=released_env(self.env))
         self.assertEqual(result.returncode, 0, result.stderr)
-        result = self.run_cmd(["bash", str(ROOT / "install.sh"), "--host", "codex"])
+        result = self.run_cmd([BASH, posix(ROOT / "install.sh"), "--host", "codex"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((Path(self.tmp.name) / ("codex/router/bin/dispatch" + "-log.py")).exists())
+
+    def test_retired_source_scan_excludes_nested_checkout_but_covers_owned_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            owned = root / "hooks/router/active.py"
+            sibling = root / "harness/CHANGELOG.md"
+            owned.parent.mkdir(parents=True)
+            sibling.parent.mkdir(parents=True)
+            owned.write_text("retired helper", encoding="utf-8")
+            sibling.write_text("old release note", encoding="utf-8")
+            self.assertEqual(list(retired_source_paths(root)), [owned])
+
+    def test_platform_table_requirements_and_limits(self):
+        lines = self.readme.splitlines()
+        starts = [n for n, line in enumerate(lines) if line.startswith("| Platform |")]
+        self.assertEqual(len(starts), 1, "one platform table")
+        self.assertEqual(tuple(lines[starts[0]:starts[0] + len(PLATFORM_TABLE) + 1]), PLATFORM_TABLE + ("",))
+        requirements = [line for line in lines if line.startswith("Requirements:")]
+        self.assertEqual(len(requirements), 1, requirements)
+        for phrase in ("Bash 3.2 or newer", "Python 3.9 or newer", "Git for Windows", "Git Bash"):
+            self.assertIn(phrase, requirements[0])
+        for line in README_LIMITS:
+            self.assertEqual(lines.count(line), 1, "README limit line missing or reworded: " + line[:70])
+        self.assertNotIn("Unix-like environment", self.readme)
+        self.assertNotIn("GNU coreutils", self.readme)
+        # The floor and the messages the README quotes are the ones the code prints.
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("if sys.version_info < (3, 9):", installer)
+        self.assertIn("printf 'router install: missing requirement: %s\\n' \"$requirement\"", installer)
+        self.assertIn("router install: missing requirement: python3", self.readme)
+        self.assertIn("[Console]::Error.WriteLine('router: Python missing; rerun install.sh')", installer)
+        launcher = (ROOT / "hooks/router/pyrun.sh").read_text(encoding="utf-8")
+        template = re.search(r'(?m)^  message="(.*)"$', launcher).group(1)
+        message = template.replace("$tool", "router").replace("$name", "ROUTER_PYTHON")
+        self.assertIn("```text\n" + message + "\n```", self.readme)
+        self.assertIn("*/WindowsApps/*", launcher)
+        self.assertIn('for candidate in python3 python \'py -3\'; do', launcher)
+
+    def test_changelog_031_groups_pairing_and_limits(self):
+        text = CHANGELOG.read_text()
+        version = (ROOT / "VERSION").read_text().strip()
+        self.assertEqual(version, "0.3.1")
+        section = text.split("## 0.3.1\n", 1)[1].split("\n## 0.3.0\n", 1)[0]
+        self.assertEqual(section.strip().split("\n\n", 1)[0], PAIRING_LINE)
+        self.assertEqual(re.findall(r"(?m)^### (.+)$", section), ["Fixed", "Platforms", "Changed"])
+        bullets = re.findall(r"(?m)^- .*$", section)
+        self.assertEqual(len(bullets), len(set(bullets)), "duplicate bullets")
+        self.assertTrue(all(line == "" or line.startswith(("- ", "### ", "Pairs with ")) for line in section.strip().splitlines()))
+        self.assertNotRegex(section, r"\b\d{2}[A-Z](?:-[a-z])?\b|\bWave [A-Z]\b|\b[Ll]ane [A-Z0-9]")
+        platforms = section.split("### Platforms\n", 1)[1].split("\n### ", 1)[0]
+        for line in CHANGELOG_LIMITS:
+            self.assertEqual(platforms.splitlines().count(line), 1, "CHANGELOG limit missing or reworded: " + line[:70])
 
     def test_changelog(self):
         text = CHANGELOG.read_text()

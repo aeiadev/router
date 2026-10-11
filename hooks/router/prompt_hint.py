@@ -60,7 +60,7 @@ def counter(path):
     if path is None or (not path.exists() and not path.is_symlink()):
         return {"count": 0, "level": None}, True
     try:
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as stream:
+        with os.fdopen(common.compat.open_fd(path), "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
                 raise ValueError("invalid counter file")
@@ -90,7 +90,7 @@ def save_counter(path, data):
         temp = path.with_name(path.name + f".{os.getpid()}.tmp")
         with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
             json.dump(data, stream, separators=(",", ":"))
-        os.replace(temp, path)
+        common.compat.replace(temp, path)
     except OSError:
         pass
 

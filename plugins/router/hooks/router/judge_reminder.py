@@ -71,7 +71,7 @@ def remember(path, digest) -> None:
     try:
         with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as stream:
             stream.write(json.dumps({"set": digest}))
-        os.replace(temporary, path)
+        common.compat.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 

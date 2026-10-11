@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, IS_WINDOWS, posix  # noqa: E402
 sys.path.insert(0, str(ROOT / "hooks/router"))
 import common
 
@@ -29,7 +31,11 @@ class PromoteTests(unittest.TestCase):
                         CLAUDE_HOME=str(self.home / "claude"), CODEX_HOME=str(self.home / "codex"))
 
     def run_cli(self, *args, env=None):
-        return subprocess.run([sys.executable, str(ROOT / "bin/router"), *args],
+        # As installed: bin/router starts through pyrun.sh. Windows cannot run an extensionless script
+        # directly (WinError 193), so there Git Bash runs it, as a user's shell would.
+        entry = ROOT / "bin/router"
+        command = [BASH, posix(entry)] if IS_WINDOWS else [str(entry)]
+        return subprocess.run([*command, *args],
                               env=env or self.env, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=15)
 
@@ -97,7 +103,10 @@ class PromoteTests(unittest.TestCase):
         self.assertIsNotNone(re.fullmatch(re.escape(evidence + f"promoted risk: shadow -> enforce ({self.local})\n"),
                                           done.stdout), repr(done.stdout))
         self.assertEqual(json.loads(self.local.read_text()), {"router": {"modes": {"risk": "enforce"}}})
-        self.assertEqual(stat.S_IMODE(self.local.stat().st_mode), 0o600)
+        if os.name == "nt":
+            print("skip: NTFS keeps no POSIX modes, so the 0600 check cannot apply", file=sys.stderr)
+        else:
+            self.assertEqual(stat.S_IMODE(self.local.stat().st_mode), 0o600)
         self.assertEqual((ROOT / "hooks/router/routes.json").read_bytes(), before)
         self.assert_error(self.run_cli("promote", "risk"), "router promote: risk is enforce, not shadow")
         forced = self.run_cli("promote", "router.modes.risk", "--force", "--dry-run")
@@ -112,6 +121,10 @@ class PromoteTests(unittest.TestCase):
 
     def test_dry_run_changes_nothing_under_home(self):
         self.log("spawns", {"shadow": True, "rule": "risk"})
+        # bin/router starts through pyrun.sh, which caches its interpreter in an existing state
+        # folder on a cold start. Hooks leave that cache warm before any CLI use; seed it the
+        # same way so the snapshot still checks every file, the cache included.
+        (self.state / "python").write_bytes((sys.executable.replace(os.sep, "/") + "\n").encode())
         self.local.parent.mkdir(parents=True)
         self.local.write_text('{"context":{"files_threshold":4}}')
         before = self.snapshot()
@@ -140,8 +153,11 @@ class PromoteTests(unittest.TestCase):
                          "evidence: large_read had 0 shadow hit(s) in the last 7d\n"
                          f"promoted large_read: shadow -> enforce ({target})\n")
         self.assertEqual(json.loads(target.read_text()), {"context": {"modes": {"large_read": "enforce"}}})
-        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o700)
+        if os.name == "nt":
+            print("skip: NTFS keeps no POSIX modes, so the 0600/0700 check cannot apply", file=sys.stderr)
+        else:
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o700)
         self.assertEqual(sorted(p.name for p in target.parent.iterdir()), ["routes.json"])
         check = self.run_cli("config", "get", "context.modes.large_read", env=env)
         self.assertEqual(check.stdout.strip(), '"enforce"')

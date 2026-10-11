@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -25,29 +26,30 @@ LINE = (r'\{"ts":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ","script":"ledger","action":"s
         r'"detail":"spool %s","path":%s\}')
 
 DRIVER = r'''
-import fcntl, json, os, signal, sys, time
+import json, os, signal, sys, time
 from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, sys.argv[1])
 import ledger
+compat = ledger.compat
 db, mode, gate, marker = Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4]), Path(sys.argv[5])
 key = sys.argv[6] if len(sys.argv) > 6 else mode
 if mode == "late":
-    real = fcntl.flock
-    def waiting(fd, op):
+    real = compat.locked
+    def waiting(*args, **kwargs):
         marker.write_text("ready")
         print("ready", flush=True)
         while not gate.exists(): time.sleep(.002)
-        return real(fd, op)
-    fcntl.flock = waiting
+        return real(*args, **kwargs)
+    compat.locked = waiting
     ledger._spool(db, {"op":"verdict", "key":key, "verdict":"PASS", "ts":1})
 elif mode == "held":
-    real = os.pread
+    real = compat.pread
     def waiting(fd, size, pos):
         marker.write_text("ready")
         while not gate.exists(): time.sleep(.002)
         return real(fd, size, pos)
-    os.pread = waiting
+    compat.pread = waiting
     ledger._spool(db, {"op":"verdict", "key":key, "verdict":"PASS", "ts":1})
 elif mode == "writer":
     for i in range(25):
@@ -55,7 +57,7 @@ elif mode == "writer":
 elif mode == "replay":
     real = os.open
     def opened(path, *args, **kwargs):
-        if Path(path).name == "ledger.spool": marker.write_text("ready")
+        if Path(path).name == "ledger.spool.lock": marker.write_text("ready")
         return real(path, *args, **kwargs)
     os.open = opened
     for i in range(40):
@@ -64,33 +66,21 @@ elif mode == "replay":
 elif mode == "once":
     real = os.open
     def opened(path, *args, **kwargs):
-        if Path(path).name == "ledger.spool": marker.write_text("ready")
+        if Path(path).name == "ledger.spool.lock": marker.write_text("ready")
         return real(path, *args, **kwargs)
     os.open = opened
     with ledger.connect(db, hook=True): pass
-elif mode == "swap":
-    # Hold the lock of whatever inode is the spool; on writer try k swap in a fresh locked spool.
-    spool = db.with_name("ledger.spool")
-    fd = os.open(spool, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    marker.write_text("ready")
-    for k in range(1, 6):
+elif mode == "hold":
+    # Hold the spool lock file until the gate opens.
+    with compat.locked(db.with_name("ledger.spool.lock"), timeout=10):
+        marker.write_text("ready")
         end = time.monotonic() + 10
-        while not gate.with_name(f"{gate.name}-{k}").exists() and time.monotonic() < end: time.sleep(.002)
-        fresh = db.with_name("ledger.spool.next")
-        new = os.open(fresh, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-        fcntl.flock(new, fcntl.LOCK_EX)
-        os.replace(fresh, spool)
-        os.close(fd)
-        fd = new
-    end = time.monotonic() + 10
-    while not gate.exists() and time.monotonic() < end: time.sleep(.002)
-    os.close(fd)
+        while not gate.exists() and time.monotonic() < end: time.sleep(.002)
 elif mode == "crash":
     real = Path.unlink
     def killed(path, *args, **kwargs):
         if path.name.startswith("ledger.spool.replay"):
-            os.kill(os.getpid(), signal.SIGKILL)
+            os.kill(os.getpid(), signal.SIGKILL) if hasattr(signal, "SIGKILL") else os._exit(9)
         return real(path, *args, **kwargs)
     Path.unlink = killed
     with ledger.connect(db, hook=True): pass
@@ -140,7 +130,8 @@ class ProcessSpoolTests(unittest.TestCase):
             return conn.execute("SELECT key, count(*) FROM verdicts GROUP BY key ORDER BY key").fetchall()
 
     def empty_spool(self):
-        self.assertEqual(list(self.db.parent.glob("ledger.spool*")), [])
+        # The lock file stays: removing a lock file races its next holder.
+        self.assertEqual([path.name for path in self.db.parent.glob("ledger.spool*")], ["ledger.spool.lock"])
 
     def test_late_writer_reopens_after_replay_claim(self):
         marker, gate = self.root / "ready", self.root / "go"
@@ -184,10 +175,10 @@ class ProcessSpoolTests(unittest.TestCase):
         self.empty_spool()
 
     def test_gated_writers_across_twenty_replays_keep_every_key_once(self):
-        """Each round, writer H holds the spool lock paused before its write, writer L has the same
-        spool open paused before its lock, and one replay runs: it must wait for H (flock in
-        _replay). A fresh spool line then lands in a new spool inode, and L must notice that its
-        inode was renamed away and reopen (inode recheck in _spool). Red with either one removed."""
+        """Each round, writer H holds the spool lock paused before its write, writer L is paused
+        before taking the lock, and one replay runs: it must wait for H (the spool lock in _replay).
+        A fresh spool line then lands in a new spool, and L opens the spool only once it holds the
+        lock, so its line lands there too. Red when replay claims without the lock."""
         expected = []
         for r in range(20):
             names = {part: self.root / f"{part}-{r:02d}" for part in ("h-go", "h-ready", "l-go", "l-ready", "r-ready")}
@@ -228,28 +219,25 @@ class ProcessSpoolTests(unittest.TestCase):
         self.assertEqual(spool.read_text(), '{"op":"verdict"}\n' * 100)
 
     def spool_busy(self):
-        """Another process holds the spool inode lock through all 5 tries, swapping the inode each time."""
-        run = len(list(self.root.glob("swap-ready-*")))
-        gate, marker, tries = self.root / f"swap-go-{run}", self.root / f"swap-ready-{run}", []
-        holder = self.proc("swap", gate, marker)
-        real = __import__("fcntl").flock
-
-        def flock(fd, op):
-            tries.append(op)
-            gate.with_name(f"{gate.name}-{len(tries)}").touch()
-            return real(fd, op)
+        """Another process holds the spool lock past the timeout: the write is skipped, not blocked."""
+        run = len(list(self.root.glob("hold-ready-*")))
+        gate, marker = self.root / f"hold-go-{run}", self.root / f"hold-ready-{run}"
+        holder = self.proc("hold", gate, marker)
         try:
             self.ready(marker)
-            with mock.patch("fcntl.flock", flock):
+            start = time.monotonic()
+            with mock.patch.object(ledger, "SPOOL_LOCK_SECONDS", .2):
                 ledger._spool(self.db, {"op": "verdict", "key": "busy-key", "verdict": "PASS", "ts": 1})
+            waited = time.monotonic() - start
             gate.touch()
             self.finish(holder)
         finally:
             if holder.poll() is None:
                 holder.kill()
                 holder.communicate()
-        self.assertEqual(len(tries), 5)
-        self.assertNotIn("busy-key", self.db.with_name("ledger.spool").read_text())
+        self.assertGreaterEqual(waited, .15)
+        spool = self.db.with_name("ledger.spool")
+        self.assertFalse(spool.exists() and "busy-key" in spool.read_text())
 
     def assert_spool_lines(self, *details):
         spool = json.dumps(str(self.db.with_name("ledger.spool")))
@@ -305,7 +293,7 @@ class ProcessSpoolTests(unittest.TestCase):
         ledger._spool(self.db, {"op": "verdict", "key": "crash", "verdict": "SEND_BACK", "ts": 1})
         proc = self.proc("crash")
         proc.communicate(timeout=20)
-        self.assertEqual(proc.returncode, -9)
+        self.assertEqual(proc.returncode, -9 if hasattr(signal, "SIGKILL") else 9)
         self.assertEqual(self.rows(), [("crash", 1)])
         self.assertEqual(len(list(self.db.parent.glob("ledger.spool.replay*"))), 1)
         with contextlib.closing(ledger.connect(self.db, hook=True)):

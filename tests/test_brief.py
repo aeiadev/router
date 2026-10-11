@@ -2,6 +2,7 @@
 """C1 and C3 spawn contract regressions."""
 import copy
 from datetime import datetime, timezone
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -98,7 +99,7 @@ class BriefTests(unittest.TestCase):
         self.assertEqual(result.stderr.strip(), "brief: BAR missing (builder needs TASK, FILES, BAR, RETURN in that order)")
         ledger_path = self.state / "ledger.sqlite3"
         if ledger_path.exists():
-            with sqlite3.connect(ledger_path) as db:
+            with contextlib.closing(sqlite3.connect(ledger_path)) as db, db:
                 self.assertEqual(db.execute("SELECT count(*) FROM attempts").fetchone()[0], 0,
                                  "a denied brief spent a ladder attempt")
                 self.assertEqual(db.execute("SELECT count(*) FROM lanes").fetchone()[0], 0,
@@ -188,8 +189,8 @@ class BriefTests(unittest.TestCase):
         self.assert_rerun_denied(first, seeded)
         rerun_file = self.state / "rerun" / "one.json"
         self.assertEqual(json.loads(rerun_file.read_text(encoding="utf-8")), [key])
-        self.assertEqual(stat.S_IMODE(rerun_file.stat().st_mode), 0o600)
-        with sqlite3.connect(self.state / "ledger.sqlite3") as db:
+        self.assertEqual(os.name == "nt" or stat.S_IMODE(rerun_file.stat().st_mode), os.name == "nt" or 0o600)
+        with contextlib.closing(sqlite3.connect(self.state / "ledger.sqlite3")) as db, db:
             self.assertEqual(db.execute("SELECT count(*) FROM attempts").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT count(*) FROM lanes").fetchone()[0], 0)
         second = self.hook(FULL)

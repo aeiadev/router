@@ -7,12 +7,14 @@ if [[ -z "${HARNESS_DIR:-}" ]]; then
 fi
 
 router_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# pyrun.sh picks the interpreter the hooks use: python3, python or py -3, never the Store stub.
+python=$("$BASH" "$router_root/hooks/router/pyrun.sh" --find router)
 if [[ ! -f "$HARNESS_DIR/install.sh" ]]; then
   printf '%s\n' 'HARNESS_DIR must name a Harness checkout with install.sh.' >&2
   exit 1
 fi
 
-python3 - "$router_root" "$HARNESS_DIR" <<'PY'
+"$python" - "$router_root" "$HARNESS_DIR" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -21,6 +23,8 @@ import sys
 import tempfile
 
 router, harness = map(Path, sys.argv[1:])
+sys.path.insert(0, str(router / "tests"))
+from _platform import BASH, home_env, posix  # noqa: E402
 roles = ("sweeper", "researcher", "planner", "builder", "builder-in-place",
          "judge", "worker", "test-writer", "docs-writer")
 
@@ -41,8 +45,9 @@ for order in (("router", "harness"), ("harness", "router")):
         home = Path(temporary)
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("ROUTER_") and key not in ("CLAUDE_HOME", "CODEX_HOME", "ROUTES_JSON")}
-        env.update(HOME=str(home), CLAUDE_HOME=str(home / ".claude"),
+        env.update(**home_env(home), CLAUDE_HOME=str(home / ".claude"),
                    CODEX_HOME=str(home / ".codex"), XDG_STATE_HOME=str(home / "state"),
+                   XDG_CONFIG_HOME=str(home / "config"), ROUTER_LOCAL="off",
                    PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_NOSYSTEM="1",
                    GIT_CONFIG_GLOBAL=os.devnull)
         original = {"unrelated_setting": "keep", "hooks": {"PreToolUse": [
@@ -55,7 +60,7 @@ for order in (("router", "harness"), ("harness", "router")):
 
         def install(product, uninstall=False):
             source = router if product == "router" else harness
-            args = ["bash", str(source / "install.sh"), "--host", "both"]
+            args = [BASH, posix(source / "install.sh"), "--host", "both"]
             if uninstall:
                 args.append("--uninstall")
             run(args, env)
@@ -132,7 +137,7 @@ for install_order in (("router", "harness"), ("harness", "router")):
             home = Path(temporary)
             env = {key: value for key, value in os.environ.items()
                    if not key.startswith("ROUTER_") and key not in ("CLAUDE_HOME", "CODEX_HOME", "ROUTES_JSON")}
-            env.update(HOME=str(home), CLAUDE_HOME=str(home / ".claude"),
+            env.update(**home_env(home), CLAUDE_HOME=str(home / ".claude"),
                        CODEX_HOME=str(home / ".codex"), XDG_STATE_HOME=str(home / "state"),
                        PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_NOSYSTEM="1",
                        GIT_CONFIG_GLOBAL=os.devnull)
@@ -143,10 +148,10 @@ for install_order in (("router", "harness"), ("harness", "router")):
 
             for product in install_order:
                 source = router if product == "router" else harness
-                run(["bash", str(source / "install.sh"), "--host", "both"], env)
+                run([BASH, posix(source / "install.sh"), "--host", "both"], env)
             for product in uninstall_order:
                 source = router if product == "router" else harness
-                run(["bash", str(source / "install.sh"), "--host", "both", "--uninstall"], env)
+                run([BASH, posix(source / "install.sh"), "--host", "both", "--uninstall"], env)
             for host, filename in (("claude", "settings.json"), ("codex", "hooks.json")):
                 config = json.loads((Path(env[host.upper() + "_HOME"]) / filename).read_text())
                 check(config == {"unrelated_setting": "keep"},
@@ -178,7 +183,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-python3 - "$router_root" "$HARNESS_DIR" <<'PY'
+"$python" - "$router_root" "$HARNESS_DIR" <<'PY'
 import collections
 import hashlib
 import json
@@ -193,6 +198,8 @@ import tempfile
 import time
 
 router, harness = map(Path, sys.argv[1:3])
+sys.path.insert(0, str(router / "tests"))
+from _platform import BASH, home_env, posix, python_shim  # noqa: E402
 FIX = router / "tests/fixtures/together"
 VERSION = (router / "VERSION").read_text().strip()
 SHORT = ".".join(VERSION.split(".")[:2])
@@ -208,6 +215,28 @@ BACKUP = re.compile(r"\.(router|harness)-backup-")
 ONLY = set(filter(None, os.environ.get("TOGETHER_ONLY", "").split(",")))
 tally = collections.Counter()
 scratch = Path(os.environ["TG_SCRATCH"])
+POSIX_MODES = os.name != "nt"
+if not POSIX_MODES:
+    print("SKIP: POSIX mode comparisons and chmod-unreadable fixtures: Windows has no POSIX file modes")
+
+
+def released_python():
+    """PATH folder for the 0.1 and 0.2 release installers, which need Python 3.10 or newer: a python3 shim
+    (python3 may be only the Store stub on Windows) for this interpreter when it qualifies, else for a
+    python3.1x on PATH. None when there is neither; the legs that run those installers then skip."""
+    found = sys.executable if sys.version_info >= (3, 10) else next(filter(None, (
+        shutil.which(f"python3.{minor}") for minor in range(20, 9, -1))), None)
+    if found is None:
+        return None
+    folder = scratch / "released-python"
+    folder.mkdir()
+    python_shim(folder, found)
+    return str(folder)
+
+
+RELEASED = released_python()
+if RELEASED is None and (not ONLY or ONLY & {"upgrade", "skew"}):
+    print("SKIP: historical upgrade start states and skew legs: the 0.1 and 0.2 release installers need Python 3.10 or newer; none is on PATH")
 
 
 def check(ok, message):
@@ -219,6 +248,15 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def remove_tree(path):
+    def clear_read_only(function, name, error):
+        if os.name != "nt" or not isinstance(error[1], PermissionError):
+            raise error[1]
+        os.chmod(name, stat.S_IREAD | stat.S_IWRITE)
+        function(name)
+    shutil.rmtree(path, onerror=clear_read_only)
+
+
 def new_home():
     home = Path(tempfile.mkdtemp(prefix="h", dir=scratch))
     shutil.copytree(FIX / "home", home, symlinks=True, dirs_exist_ok=True)
@@ -228,7 +266,7 @@ def new_home():
 def pinned(home, **extra):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("ROUTER_", "HARNESS_", "CLAUDE", "CODEX_", "XDG_")) and key != "ROUTES_JSON"}
-    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"), XDG_STATE_HOME=str(home / ".local/state"),
+    env.update(**home_env(home), XDG_CONFIG_HOME=str(home / ".config"), XDG_STATE_HOME=str(home / ".local/state"),
                CLAUDE_HOME=str(home / ".claude"), CODEX_HOME=str(home / ".codex"),
                ROUTER_STATE=str(home / ".local/state/claude-router"), ROUTER_LOCAL="off",
                PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
@@ -242,13 +280,13 @@ def tree(root):
         for name in folders + files:
             path = Path(base) / name
             info = path.lstat()
-            relative = str(path.relative_to(root))
+            relative = path.relative_to(root).as_posix()
             if stat.S_ISLNK(info.st_mode):
                 found[relative] = ("link", os.readlink(path))
             elif stat.S_ISDIR(info.st_mode):
-                found[relative] = ("dir", stat.S_IMODE(info.st_mode))
+                found[relative] = ("dir", stat.S_IMODE(info.st_mode) if POSIX_MODES else None)
             else:
-                found[relative] = ("file", sha(path.read_bytes()), stat.S_IMODE(info.st_mode))
+                found[relative] = ("file", sha(path.read_bytes()), stat.S_IMODE(info.st_mode) if POSIX_MODES else None)
     return found
 
 
@@ -267,7 +305,13 @@ def run(command, env, payload=None, expected=0, cwd=None):
 
 
 def install(tool, version, home, host, *extra, expected=0):
-    return run(["bash", SRC[(tool, version)] / "install.sh", "--host", host, *extra], pinned(home), expected=expected)
+    env = pinned(home) if version == VERSION else pinned(home, PATH=RELEASED + os.pathsep + os.environ.get("PATH", os.defpath))
+    if os.name == "nt" and version != VERSION and "--uninstall" in extra:
+        # Historical installers cannot remove the read-only files they copied from a checkout.
+        for folder, _, names in os.walk(home):
+            for name in names:
+                os.chmod(os.path.join(folder, name), stat.S_IREAD | stat.S_IWRITE)
+    return run([BASH, posix(SRC[(tool, version)] / "install.sh"), "--host", host, *extra], env, expected=expected)
 
 
 def folders(home, host):
@@ -275,7 +319,10 @@ def folders(home, host):
 
 
 def manifest(folder, tool):
-    return json.loads((folder / tool / "install-manifest.json").read_text())
+    value = json.loads((folder / tool / "install-manifest.json").read_text())
+    # Released Windows installers used backslashes; compare both generations by one spelling.
+    value["files"] = {key.replace("\\", "/"): item for key, item in value["files"].items()}
+    return value
 
 
 def recorded(value):
@@ -291,6 +338,8 @@ def held_0600(snapshot, names):
     """The documented 0.1/0.2 limit: if Harness 0.1 or 0.2 went first, the settings file keeps the
     user's bytes but stays 0600. The snapshot with each settings file at that mode."""
     held = dict(snapshot)
+    if not POSIX_MODES:
+        return held
     for name in names:
         key = f"{HOSTS[name][0]}/{HOSTS[name][1]}"
         if key in held and held[key][0] == "file":
@@ -438,7 +487,7 @@ def upgrade_case(host, start, first):
         pre = tree(home)
         if all(install(tool, version, home, host, expected=None).returncode == 0 for tool, version in setup):
             break
-        shutil.rmtree(home)
+        remove_tree(home)
     else:
         # The old pair never coexisted (each old installer refuses the other's roles, audit C1): start
         # from the first one installed and the second one refused with every file unchanged.
@@ -472,6 +521,26 @@ def upgrade_case(host, start, first):
         install(tool, VERSION, home, host, "--dry-run")
         check(tree(home) == before, f"{label}: {tool} --dry-run wrote {changes(before, tree(home))[:4]}")
         output[tool] = install(tool, VERSION, home, host).stdout.splitlines()
+    # The first 0.3 run sees the older sibling and says so once per host folder; the second 0.3 run
+    # always sees a 0.3 sibling and prints nothing about it.
+    skew = lambda tool: [line for line in output[tool] if line.startswith("shared roles come from")]
+    check(not skew(order[1]), f"{label}: the second 0.3 run printed the skew notice: {skew(order[1])[:2]}")
+    if (OTHER[first], "0.2") in setup:
+        # The notice names shared roles the older sibling's manifest claims. Harness 0.2 on Windows
+        # recorded "agents\\x.md" keys and compared them with its "/"-spelled role list, so there it
+        # claims none: the 0.3 Router owns and refreshes those roles and rightly prints nothing.
+        claiming = [name for name, _ in folders(home, host)
+                    if any(f"agents/{role}{HOSTS[name][2]}" in old.get((name, OTHER[first]), ()) for role in ROLES)]
+        if len(claiming) < len(folders(home, host)):
+            check(os.name == "nt" and OTHER[first] == "harness",
+                  f"{label}: the older {OTHER[first]} claims no shared role on {sorted(set(n for n, _ in folders(home, host)) - set(claiming))}")
+            if not tally["unclaimed note"]:
+                print("SKIP: skew notice after a Windows Harness 0.2 install: Harness 0.2 on Windows claims no "
+                      "shared roles (backslash manifest keys), so Router refreshes them and prints none")
+            tally["unclaimed note"] += 1
+        check(len(skew(order[0])) == len(claiming),
+              f"{label}: the first 0.3 run printed {len(skew(order[0]))} skew notices, expected {len(claiming)}: "
+              f"{output[order[0]][:3]}")
     for name, folder in folders(home, host):
         for tool in ("router", "harness"):
             record = manifest(folder, tool)
@@ -492,7 +561,7 @@ def upgrade_case(host, start, first):
     reruns_settle(home, host, order, behind, label)
     tally["settled", host] += 1
     for unorder in (order, order[::-1]):
-        shutil.rmtree(home)
+        remove_tree(home)
         shutil.copytree(keep, home, symlinks=True)
         # Retired 0.2 state (a database and its wal) sits in Router's state dir before the uninstall:
         # a plain uninstall keeps it, only --purge removes it.
@@ -507,7 +576,7 @@ def upgrade_case(host, start, first):
             if key in RETIRED or any(retired.startswith(key + "/") for retired in RETIRED) and key not in pre:
                 expected[key] = planted[key]
         for target in edited:
-            expected[str(target.relative_to(home))] = planted[str(target.relative_to(home))]
+            expected[target.relative_to(home).as_posix()] = planted[target.relative_to(home).as_posix()]
         for tool in unorder:
             install(tool, VERSION, home, host, "--uninstall")
         now = tree(home)
@@ -533,14 +602,16 @@ def upgrade_case(host, start, first):
         final = {k: v for k, v in (held_0600(expected, names) if harness_first else expected).items() if k not in RETIRED}
         check(after == final, f"{label}: HOME after --purge is not the pre-0.1 tree: {changes(final, after)[:6]}")
     tally["upgrade", host] += 1
-    shutil.rmtree(keep)
-    shutil.rmtree(home)
+    tally["clean", host] += not start
+    remove_tree(keep)
+    remove_tree(home)
 
 
 if not ONLY or "upgrade" in ONLY:
     started = time.monotonic()
-    # The full matrix on every host mode: 9 start states, both first tools, claude, codex and both.
-    plan = [(host, start, first) for host in ("both", "claude", "codex") for start in START for first in ("router", "harness")]
+    # Empty starts use only current releases, even without Python for the eight historical states.
+    starts = [start for start in START if RELEASED or not start]
+    plan = [(host, start, first) for host in ("both", "claude", "codex") for start in starts for first in ("router", "harness")]
     expected_strict = collections.Counter()
     for host, start, first in plan:
         upgrade_case(host, start, first)
@@ -549,12 +620,22 @@ if not ONLY or "upgrade" in ONLY:
     for name, count in expected_strict.items():
         check(tally["pre01", name] == count,
               f"pre-0.1 comparison ran {tally['pre01', name]} times for {name}, expected {count}")
-        check(tally["converged", name] > 0, f"no upgrade case refreshed a stale {name} role record")
+        if RELEASED:
+            check(tally["converged", name] > 0, f"no upgrade case refreshed a stale {name} role record")
+        else:
+            check(tally["converged", name] == 0, f"an empty start unexpectedly had stale {name} role records")
+    for host in ("both", "claude", "codex"):
+        check(tally["clean", host] == 2, f"current-only empty starts ran {tally['clean', host]} times for {host}, expected 2")
+        expected_cases = 18 if RELEASED else 2
+        check(tally["upgrade", host] == expected_cases,
+              f"upgrade cases ran {tally['upgrade', host]} times for {host}, expected {expected_cases}")
     check(sum(tally["settled", h] for h in ("both", "claude", "codex")) == len(plan), "a rerun check was skipped")
-    print(f"PASS: upgrade and uninstall matrix ({', '.join(f'{h} {tally['upgrade', h]}' for h in ('both', 'claude', 'codex'))} "
+    print(f"PASS: upgrade and uninstall matrix ({', '.join(h + ' ' + str(tally['upgrade', h]) for h in ('both', 'claude', 'codex'))} "
           f"cases; exact pre-0.1 tree {tally['pre01', 'claude']} claude, {tally['pre01', 'codex']} codex; "
           f"stale role records refreshed {tally['converged', 'claude']} claude, {tally['converged', 'codex']} codex; "
           f"{time.monotonic() - started:.0f}s)")
+    if not RELEASED:
+        print("NOTE: stale-role convergence does not apply to current-only empty starts")
 
 
 def status_lines(home, host, env=None):
@@ -566,7 +647,7 @@ def status_lines(home, host, env=None):
         if (folder / "router/install-manifest.json").is_file() and manifest(folder, "router").get("package") == VERSION:
             result = run([sys.executable, folder / "router/bin/router", "doctor"], env, expected=None)
             doctors.append((f"installed {name}", result.stdout.splitlines()))
-    status = run(["bash", harness / "install.sh", "--status"], env)
+    status = run([BASH, posix(harness / "install.sh"), "--status"], env)
     return doctors, status.stdout.splitlines()
 
 
@@ -634,7 +715,11 @@ def skew_case(new, host, order):
         keep = scratch / ("keep-" + home.name)
         shutil.copytree(home, keep, symlinks=True)
         for unorder in ((new, old), (old, new)):
-            shutil.rmtree(home)
+            if os.name == "nt" and unorder[0] == old:
+                print(f"SKIP: {label}, old {NAME[old]} 0.2 uninstalled first: its pre-Windows uninstaller "
+                      "cannot read current manifest paths; upgrade both tools before uninstalling")
+                continue
+            remove_tree(home)
             shutil.copytree(keep, home, symlinks=True)
             install(unorder[0], VERSION if unorder[0] == new else "0.2", home, host, "--uninstall")
             owned_intact(home, host, unorder[1], f"{label}, {unorder[0]} uninstalled first")
@@ -651,9 +736,12 @@ def skew_case(new, host, order):
             if unorder[1] == old:
                 key = f"{HOSTS[host][0]}/{HOSTS[host][1]}"
                 content = json.loads((FIX / "home" / key).read_bytes())
-                wanted[key] = ("file", sha((json.dumps(content, indent=2, ensure_ascii=False) + "\n").encode()), pre[key][2])
+                rendered = json.dumps(content, indent=2, ensure_ascii=False) + "\n"
+                if old == "router":  # Router 0.2 wrote text with the platform's newline convention.
+                    rendered = rendered.replace("\n", os.linesep)
+                wanted[key] = ("file", sha(rendered.encode()), pre[key][2])
             compare_pre(wanted, now, home, [host], f"{label}, uninstall {unorder}", old == "harness")
-        shutil.rmtree(home)
+        remove_tree(home)
         shutil.copytree(keep, home, symlinks=True)
         # The 0.2 sibling upgrades: it moves the shared roles to the VERSION bytes, and new's rerun then
         # refreshes its stale record of them (design C); no run prints the notice.
@@ -670,7 +758,7 @@ def skew_case(new, host, order):
                 check(found == ["[ok] skew: none"], f"{label}, upgraded: {kind} router doctor shows {found}")
             found = [line for line in section(status, f"Harness status ({name})") if re.fullmatch(r"skew: .*", line)]
             check(found == ["skew: none"], f"{label}, upgraded: install.sh --status shows {found}")
-        shutil.rmtree(keep)
+        remove_tree(keep)
     else:
         install(new, VERSION, home, host)
         setup = tree(home)
@@ -679,7 +767,8 @@ def skew_case(new, host, order):
         message = (f"harness: refusing to overwrite existing or modified file: agents/builder-in-place{HOSTS[host][2]}; "
                    "move it aside before installing" if old == "harness" else
                    f"router install: refusing to overwrite an existing or modified file: {folder}/agents/builder-in-place{HOSTS[host][2]}")
-        check(refused.stderr.splitlines()[-1:] == [message], f"{label}: refusal message {refused.stderr[-300:]}")
+        check([line.replace("\\", "/") for line in refused.stderr.splitlines()[-1:]] == [message.replace("\\", "/")],
+              f"{label}: refusal message {refused.stderr[-300:]}")
         check(tree(home) == setup, f"{label}: the refused 0.2 run changed {changes(setup, tree(home))[:4]}")
         install(new, VERSION, home, host, "--uninstall")
         compare_pre(pre, tree(home), home, [host], f"{label}, uninstalled")
@@ -696,21 +785,21 @@ def checkout_gone_case(host):
     copy = Path(tempfile.mkdtemp(prefix="c", dir=scratch)) / "router"
     shutil.copytree(router, copy, symlinks=True, ignore=shutil.ignore_patterns(".git", "__pycache__"))
     install("harness", "0.2", home, host)
-    run(["bash", copy / "install.sh", "--host", host], pinned(home))
+    run([BASH, posix(copy / "install.sh"), "--host", host], pinned(home))
     folder = folders(home, host)[0][1]
     check(manifest(folder, "router").get("source") == str(copy), f"{label}: the manifest source is not the copy")
     for gone, wanted in ((False, f"[warn] skew: shared roles come from Harness 0.2.0 or earlier; upgrade it for the {SHORT} roles"),
                          (True, "[warn] skew: unknown (checkout not found)")):
         if gone:
-            shutil.rmtree(copy.parent)
+            remove_tree(copy.parent)
         doctor = run([sys.executable, folder / "router/bin/router", "doctor"], pinned(home), expected=None).stdout.splitlines()
         found = [line for line in section(doctor, f"Router doctor ({host})") if re.fullmatch(r"\[\w+\] skew: .*", line)]
         check(found == [wanted], f"{label}{' (copy removed)' if gone else ''}: installed router doctor shows {found}")
     tally["checkout gone", host] += 1
-    shutil.rmtree(home)
+    remove_tree(home)
 
 
-if not ONLY or "skew" in ONLY:
+if (not ONLY or "skew" in ONLY) and RELEASED:
     for new in ("router", "harness"):
         for host in ("claude", "codex"):
             for order in ("0.2 first", f"{VERSION} first"):
@@ -843,7 +932,7 @@ def restore_case(name, order):
         tally["restore", name] += 1
     quiet = restore_outputs(folder, name, env, cwd, session + "-without-lanes")
     check(quiet["router"] == "", f"{label}: Router printed with no lanes: {quiet['router'][:120]}")
-    shutil.rmtree(home)
+    remove_tree(home)
 
 
 if not ONLY or "restore" in ONLY:
@@ -904,8 +993,10 @@ def pressure_case(name):
         session = f"pressure-{name}-{percent}"
         write_pressure(folder, name, env, cwd, session, window * percent // 100, window)
         path = pressure_file(home, session)
-        check(path.is_file() and stat.S_IMODE(path.stat().st_mode) == 0o600, f"{name} {percent}%: pressure file {path} missing or not 0600")
-        check(stat.S_IMODE(path.parent.stat().st_mode) == 0o700, f"{name}: pressure directory is not 0700")
+        check(path.is_file(), f"{name} {percent}%: pressure file {path} missing")
+        if POSIX_MODES:
+            check(stat.S_IMODE(path.stat().st_mode) == 0o600, f"{name} {percent}%: pressure file {path} is not 0600")
+            check(stat.S_IMODE(path.parent.stat().st_mode) == 0o700, f"{name}: pressure directory is not 0700")
         record = json.loads(path.read_text())
         check(record.get("schema") == 1 and record.get("host") == name and record.get("level") == level and
               abs(record.get("percent") - percent) < 0.01 and record.get("window") == window,
@@ -935,8 +1026,10 @@ def pressure_case(name):
     session = f"pressure-{name}-xdg"
     write_pressure(folder, name, moved, cwd, session, window * 90 // 100, window)
     landed = pressure_file(home, session, elsewhere)
-    check(landed.is_file() and stat.S_IMODE(landed.stat().st_mode) == 0o600 and not pressure_file(home, session).exists(),
+    check(landed.is_file() and not pressure_file(home, session).exists(),
           f"{name}: with XDG_STATE_HOME set the pressure file is not only at {landed}")
+    if POSIX_MODES:
+        check(stat.S_IMODE(landed.stat().st_mode) == 0o600, f"{name}: pressure file {landed} is not 0600")
     count, note = reads_until_note(folder, name, moved, cwd, session)
     # The whole note line Router prints, copied from a real run.
     wanted = ("Context note (delegation guard): 2 consecutive single read-type tool calls in the main loop with no "
@@ -957,6 +1050,8 @@ def pressure_case(name):
     sample = json.loads((FIX / "pressure-sample.json").read_text())
     sample["host"] = name
     for kind in ("absent", "stale", "malformed", "unreadable"):
+        if kind == "unreadable" and not POSIX_MODES:
+            continue
         session = f"pressure-{name}-{kind}"
         path = pressure_file(home, session)
         for marker in (home / ".local/state/claude-router").glob("pressure-warned"):
@@ -973,11 +1068,12 @@ def pressure_case(name):
         check(count == 5 and "Context is at" not in note, f"{name} {kind}: Router output changed ({count})")
         logged = b"".join(p.read_bytes()[len(logs_before.get(p, b"")):] for p in (home / ".local/state/claude-router").rglob("*")
                           if p.is_file() and p.suffix in (".jsonl", ".log"))
-        check((str(path).encode() in logged) == (kind in ("malformed", "unreadable")),
+        encoded_path = json.dumps(str(path))[1:-1].encode("utf-8")
+        check((encoded_path in logged) == (kind in ("malformed", "unreadable")),
               f"{name} {kind}: logged error naming the file is {'missing' if kind in ('malformed', 'unreadable') else 'unexpected'}")
         if kind == "unreadable":
             os.chmod(path, 0o600)
-    shutil.rmtree(home)
+    remove_tree(home)
 
 
 if not ONLY or "pressure" in ONLY:
@@ -999,9 +1095,13 @@ def versions_case():
     # other write from the checkout doctor, Harness --status, or the installed bin/router doctor and
     # status of each host (each avoids bytecode itself).
     env = {key: value for key, value in pinned(home).items() if key != "PYTHONDONTWRITEBYTECODE"}
+    # Stock macOS python3 caches its own startup bytecode (encodings, site) under
+    # HOME/Library/Caches/com.apple.python before any script line runs. One bare start puts that in the
+    # baseline, so any further write below is still the commands' own.
+    run([sys.executable, "-c", "pass"], env)
     before = tree(home)
     base = run([sys.executable, router / "bin/router", "doctor"], env, expected=None)
-    status = run(["bash", harness / "install.sh", "--status"], env)
+    status = run([BASH, posix(harness / "install.sh"), "--status"], env)
     installed_doctors = []
     for name in ("claude", "codex"):
         command = home / HOSTS[name][0] / "router/bin/router"
@@ -1037,7 +1137,7 @@ def versions_case():
             fails = any(line.startswith("[FAIL]") for line in doctor.stdout.splitlines())
             check(doctor.returncode == (1 if fails else 0) and re.search(r"^doctor: \d+ ok", doctor.stdout, re.M),
                   f"versions: {kind} {tool} manifest broke doctor's exit code rule: {doctor.returncode} {doctor.stderr[-200:]}")
-            status = run(["bash", harness / "install.sh", "--status"], env)
+            status = run([BASH, posix(harness / "install.sh"), "--status"], env)
             for name in ("claude", "codex"):
                 found = (version_lines(doctor.stdout.splitlines(), f"Router doctor ({name})", True) +
                          version_lines(status.stdout.splitlines(), f"Harness status ({name})", False))
@@ -1048,7 +1148,7 @@ def versions_case():
                 check(all(line in found for line in wanted), f"versions {name}: {kind} {tool} manifest shows {found}")
             for name in ("claude", "codex"):
                 (home / HOSTS[name][0] / tool / "install-manifest.json").write_bytes(saved_all[tool, name])
-    shutil.rmtree(home)
+    remove_tree(home)
 
 
 def plugin_case():
@@ -1091,7 +1191,7 @@ def plugin_case():
             check((result.returncode, result.stdout, result.stderr) == (expected.returncode, expected.stdout, expected.stderr),
                   f"plugin: spawn decision differs from the script hook: {result.stdout[:160]} {result.stderr[:160]}")
     tally["plugin", "claude"] += 1
-    shutil.rmtree(home)
+    remove_tree(home)
 
 
 if not ONLY or "versions" in ONLY:

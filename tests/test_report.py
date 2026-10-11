@@ -213,7 +213,7 @@ class LadderAttributionTests(ReportCase):
     def test_verdict_with_a_deleted_lane_shows_tier_question_mark(self):
         self.lane("c:k1", BRIEF_1, "std", 3 * HOUR, "returned", [("PASS", 1, 3 * HOUR - 120)])
         import sqlite3
-        with sqlite3.connect(self.db) as conn:
+        with contextlib.closing(sqlite3.connect(self.db)) as conn, conn:
             conn.execute("DELETE FROM lanes")
         out = self.run_report()[1]
         self.assertRegex(out, r"(?ms)^first pass by tier\ntier +briefs +first-pass +rate +rounds-to-PASS\n"
@@ -234,7 +234,7 @@ class ArchivedSpawnTests(ReportCase):
         self.lane("c:k1", BRIEF_1, "std", 20 * HOUR)
         self.lane("c:k1", BRIEF_2, "up", HOUR)
         import sqlite3
-        with sqlite3.connect(self.db) as conn:
+        with contextlib.closing(sqlite3.connect(self.db)) as conn, conn:
             rounds = sorted(r[0] for r in conn.execute("SELECT round FROM attempts"))
         self.assertTrue(rounds[0] < 0 and rounds[1] > 0, rounds)
         out = self.run_report()[1]

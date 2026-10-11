@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
+IFS= read -r crlf_probe 2>/dev/null < "$0"; case $crlf_probe in *$'\r') echo 'router install: CRLF line endings; run: git rm -r --cached -q . && git reset --hard -q (or re-download)' >&2; exit 1;; esac #
 set -euo pipefail
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 
+# pyrun.sh finds Python 3.9+: python3, python, then py -3, never the Windows Store stub.
+here=${BASH_SOURCE[0]%/*}
+[[ $here != "${BASH_SOURCE[0]}" ]] || here=.
 for requirement in python3 git; do
-  if ! command -v "$requirement" >/dev/null 2>&1; then
-    printf 'router install: missing requirement: %s\n' "$requirement" >&2
-    exit 1
+  if [[ $requirement == python3 ]]; then
+    python=$("$BASH" "$here/hooks/router/pyrun.sh" --find router 2>/dev/null) && continue
+  elif command -v "$requirement" >/dev/null 2>&1; then
+    continue
   fi
+  printf 'router install: missing requirement: %s\n' "$requirement" >&2
+  exit 1
 done
 
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 - "$source_root" "$@" <<'PY'
+exec "$python" -B - "$source_root" "$@" <<'PY'
 """Install local router files and merge hooks without replacing user settings."""
 import argparse
 import copy
@@ -18,6 +26,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path
 import re
 import shlex
@@ -27,8 +36,8 @@ import sys
 import tempfile
 import time
 
-if sys.version_info < (3, 10):
-    sys.exit("router install: missing requirement: python3 3.10 or newer")
+if sys.version_info < (3, 9):
+    sys.exit("router install: missing requirement: python3 3.9 or newer")
 
 source = Path(sys.argv[1])
 try:
@@ -51,7 +60,41 @@ parser.add_argument("--status", action="store_true", help="report Claude Code pl
 args = parser.parse_args(sys.argv[2:])
 if args.purge and args.with_defaults:
     sys.exit("router install: --purge cannot be combined with --with-defaults")
-homes = {name: Path(os.environ.get(name.upper() + "_HOME") or Path.home() / ("." + name)).expanduser().absolute()
+POSIX_MODES = os.name != "nt"  # NTFS keeps only a read-only flag: skip chmod there and never report a mode
+
+
+def set_mode(path, mode):
+    if POSIX_MODES:
+        os.chmod(path, mode)
+
+
+def on_path(name):
+    """shutil.which, plus on Windows a PATH file with no PATHEXT extension (an npm or Git Bash shell shim)."""
+    if shutil.which(name):
+        return True
+    return os.name == "nt" and any(os.path.isfile(os.path.join(folder, name))
+                                   for folder in os.environ.get("PATH", "").split(os.pathsep) if folder)
+
+
+def writable(path):
+    """Windows refuses to replace or unlink a read-only file, which the 0.1 and 0.2 installers left;
+    clear that flag on Router's own file before replacing it. POSIX needs no change."""
+    if not POSIX_MODES and os.path.isfile(path) and not os.path.islink(path):
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+
+
+def can_symlink():
+    """False where this user cannot create symlinks (Windows without Developer Mode)."""
+    with tempfile.TemporaryDirectory(prefix="router-link-") as folder:
+        try:
+            os.symlink("target", os.path.join(folder, "link"))
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
+# compat.home(): $HOME first, because Windows Python's Path.home() reads USERPROFILE only.
+homes = {name: Path(os.environ.get(name.upper() + "_HOME") or common.compat.home() / ("." + name)).expanduser().absolute()
          for name in ("claude", "codex")}
 if args.status:
     if args.host or args.dry_run or args.uninstall or args.with_defaults or args.purge:
@@ -64,7 +107,7 @@ if args.host:
     selected = ["claude", "codex"] if args.host == "both" else [args.host]
 else:
     selected = [name for name, folder in homes.items()
-                if folder.is_dir() or os.environ.get(name.upper() + "_HOME") or shutil.which(name)]
+                if folder.is_dir() or os.environ.get(name.upper() + "_HOME") or on_path(name)]
     if not selected:
         selected = ["claude"]
 
@@ -73,13 +116,50 @@ def fail(message):
     raise ValueError(message)
 
 
+WINDOWS = os.name == "nt"
+NO_PYTHON_EXIT = {"warn": 1, "block": 2, "status": 0}
+
+
+def hook_command(host, home, rel, mode, windows):
+    """Hook fields that run hooks/router/<rel> through pyrun.sh: "command" (sh), plus, for Codex on
+    Windows, a PowerShell "command_windows" pinned to this installer's Python."""
+    custom = home != (common.compat.home() / ("." + host)).absolute()
+    absolute = windows or custom or " " in str(home)  # Windows and spaced homes get quoted C:/ paths
+    environment = []
+    if host == "codex":
+        if custom:
+            environment.append("CODEX_HOME=" + shlex.quote(home.as_posix()))
+        environment.append("ROUTER_HOME=" + (shlex.quote((home / "router").as_posix()) if absolute
+                                             else '"${CODEX_HOME:-$HOME/.codex}/router"'))
+        launcher = '"${CODEX_HOME:-$HOME/.codex}/hooks/router/pyrun.sh"'
+    else:
+        if custom:
+            environment.append("CLAUDE_HOME=" + shlex.quote(home.as_posix()))
+        launcher = '"$HOME/.claude/hooks/router/pyrun.sh"'
+    if absolute:
+        launcher = shlex.quote((home / "hooks/router/pyrun.sh").as_posix())
+    fields = {"command": " ".join(environment + ["sh", launcher, "router", mode, rel])}
+    if windows and host == "codex":
+        def quote(text):
+            return "'" + str(text).replace("'", "''") + "'"
+        assignments = "".join(f"$env:{name}={quote(value)}; " for name, value in
+                              ((("CODEX_HOME", home.as_posix()),) if custom else ()) +
+                              (("ROUTER_HOME", (home / "router").as_posix()),))
+        fields["command_windows"] = (
+            f"{assignments}$env:PYTHONIOENCODING='utf-8'; $p={quote(Path(sys.executable).as_posix())}; if (Test-Path -LiteralPath $p) "
+            f"{{ & $p -B -X utf8 {quote((home / 'hooks/router' / rel).as_posix())}; exit $LASTEXITCODE }}; "
+            "[Console]::Error.WriteLine('router: Python missing; rerun install.sh'); "
+            f"exit {NO_PYTHON_EXIT[mode]}")
+    return fields
+
+
 def load_json(path, default):
     if path.is_symlink():
         fail(f"refusing symlink: {path}")
     if not path.exists():
         return copy.deepcopy(default)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
         fail(f"cannot read JSON in {path}: {exc}")
     if not isinstance(value, dict):
@@ -101,9 +181,23 @@ def validate_hooks(path, value):
                 fail(f"{path} hooks.{event} has an invalid block")
 
 
+def posix_keys(manifest):
+    """The manifest with "files" keys and "created_dirs" read with either separator. Older releases on
+    Windows wrote a backslash; Router and Harness ship no name that holds one."""
+    value = dict(manifest)
+    if isinstance(value.get("files"), dict):
+        value["files"] = {key.replace("\\", "/") if isinstance(key, str) else key: digest
+                          for key, digest in value["files"].items()}
+    if isinstance(value.get("created_dirs"), list):
+        value["created_dirs"] = [item.replace("\\", "/") if isinstance(item, str) else item
+                                 for item in value["created_dirs"]]
+    return value
+
+
 def validate_manifest(path, value):
     if value.get("version") != 1 or not isinstance(value.get("files"), dict) or not isinstance(value.get("hooks"), list):
         fail(f"invalid router install manifest: {path}")
+    value.update(posix_keys(value))  # A 0.2 install on Windows wrote paths with a backslash.
     for entry in value["hooks"]:
         if not isinstance(entry, dict) or not isinstance(entry.get("event"), str) or not isinstance(entry.get("block"), dict):
             fail(f"invalid router install manifest: {path}")
@@ -162,7 +256,7 @@ def old_install_dirs(manifest):
     files = manifest.get("files") if isinstance(manifest, dict) else None
     if not isinstance(files, dict):
         return []
-    return sorted({str(parent) for relative in files for parent in Path(relative).parents
+    return sorted({parent.as_posix() for relative in files for parent in Path(relative).parents
                    if str(parent) != "."})
 
 
@@ -174,9 +268,10 @@ def harness_manifest():
     try:
         if sibling.is_symlink() or not sibling.is_file():
             return None
-        value = json.loads(sibling.read_text(encoding="utf-8"))
+        value = json.loads(sibling.read_text(encoding="utf-8-sig"))
         if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("files"), dict) or not isinstance(value.get("hooks"), dict):
             return None
+        value = posix_keys(value)  # Harness 0.1 and 0.2 on Windows recorded paths with a backslash.
         for relative, digest in value["files"].items():
             if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
                 return None
@@ -212,6 +307,7 @@ def purge():
             # Only regular files directly in the home: never a link, never recursive.
             if fnmatch.fnmatchcase(path.name, "*.router-backup-*") and regular_file(path):
                 if not args.dry_run:
+                    writable(path)
                     path.unlink()
                 print(f"{verb} backup: {path}")
                 count += 1
@@ -220,6 +316,7 @@ def purge():
     for path in (retired, *(retired.with_name(retired.name + suffix) for suffix in ("-wal", "-shm", "-journal"))):
         if regular_file(path):
             if not args.dry_run:
+                writable(path)
                 path.unlink()
             print(f"{verb} retired state: {path}")
     print(f"{'Would purge' if args.dry_run else 'Purged'} {count} backup(s)")
@@ -248,9 +345,10 @@ def write_bytes(path, data, mode=None):
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
         if mode is not None:
-            os.chmod(temporary, mode)
+            set_mode(temporary, mode)
         elif path.exists():
-            os.chmod(temporary, path.stat().st_mode & 0o777)
+            set_mode(temporary, path.stat().st_mode & 0o777)
+        writable(path)
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -277,9 +375,20 @@ def plain_name(value):
     return isinstance(value, str) and Path(value).name == value and value not in ("", ".", "..")
 
 
+def fresh_backup():
+    """A settings backup path no file holds yet. time_ns() moves in coarse ticks on Windows Python 3.12,
+    so two backups in one run could share a name and the second would replace the first."""
+    stamp = time.time_ns()
+    while True:
+        backup = settings.with_name(f"{settings.name}.router-backup-{stamp}")
+        if not backup.exists() and not backup.is_symlink():
+            return backup
+        stamp += 1
+
+
 def copy_original(data):
     """Keep the original settings in a private backup of Router's own."""
-    backup = settings.with_name(f"{settings.name}.router-backup-{time.time_ns()}")
+    backup = fresh_backup()
     write_bytes(backup, data, 0o600)
     print(f"Backed up original settings: {backup}")
     return backup.name
@@ -362,7 +471,7 @@ def shipped(relative):
 def private_backup(path):
     """Backups can hold secrets from settings or instructions: owner read and write only."""
     if path is not None and regular_file(path):
-        os.chmod(path, 0o600)
+        set_mode(path, 0o600)
 
 
 def save_settings(data, original):
@@ -370,9 +479,9 @@ def save_settings(data, original):
         return None
     backup = None
     if settings.exists():
-        backup = settings.with_name(f"{settings.name}.router-backup-{time.time_ns()}")
+        backup = fresh_backup()
         shutil.copy2(settings, backup)
-        os.chmod(backup, 0o600)
+        set_mode(backup, 0o600)
         print(f"Backed up settings: {backup}")
     write_json(settings, data)
     return backup
@@ -470,10 +579,12 @@ def run(preflight=False):
             write_bytes(settings, data, file_mode(recorded_mode))
         elif config in ({}, {"hooks": {}}) and existed is not True:
             if settings.exists():
+                writable(settings)
                 settings.unlink()
         else:
             save_settings(config, original)
         for target in removable:
+            writable(target)
             target.unlink()
         installed_python_roots = {home / Path(relative).parent
                                   for relative in manifest["files"]
@@ -483,6 +594,7 @@ def run(preflight=False):
                 for cache in root.rglob("__pycache__"):
                     if cache.is_dir():
                         shutil.rmtree(cache)
+        writable(manifest_path)
         manifest_path.unlink()
         # Only directories this install created, only when empty, deepest first.
         # A manifest upgraded from 0.1 or 0.2 has no record: take the folders its listed files live in.
@@ -503,10 +615,20 @@ def run(preflight=False):
             if path.name == "SHARED.sha256":
                 continue  # Repository drift check, not an installable agent.
             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
-                files[str(Path(destination) / path.relative_to(folder))] = path
+                files[(Path(destination) / path.relative_to(folder)).as_posix()] = path
     files["router/bin/router"] = source / "bin/router"
     # Each installed CLI resolves the shared core from its own host tree.
-    links = {"router/common.py": "../hooks/router/common.py", "router/routes.json": "../hooks/router/routes.json"}
+    links = {"router/common.py": "../hooks/router/common.py", "router/compat.py": "../hooks/router/compat.py",
+             "router/routes.json": "../hooks/router/routes.json"}
+    if links and not can_symlink():
+        # No symlink privilege: install a copy of each link's target. The manifest records it by
+        # sha256 like any file, so upgrade and uninstall handle copies and links alike.
+        files.update({relative: files[posixpath.normpath(posixpath.join(posixpath.dirname(relative), link))]
+                      for relative, link in links.items()})
+        links = {}
+    # Link text in the native separator: Windows leaves a relative link spelled with "/" dangling, so a
+    # "/" link an older install recorded differs from this one and is rewritten.
+    links = {relative: link.replace("/", os.sep) for relative, link in links.items()}
     # An upgrade drops what this checkout no longer ships: unchanged files go, edited ones
     # stay as the user's. Shared roles are never dropped here, and no directory is removed.
     stale, kept_old = [], []
@@ -557,17 +679,11 @@ def run(preflight=False):
     if "hooks" not in template_value:
         fail(f"missing hooks in {template_path}")
     additions = template_value["hooks"]
-    if home != (Path.home() / ("." + host)).absolute():
-        for blocks in additions.values():
-            for block in blocks:
-                for hook in block["hooks"]:
-                    script = re.search(r"/([a-z_]+\.py)", hook["command"])[1]
-                    if host == "codex":
-                        environment = (f"CODEX_HOME={shlex.quote(str(home))} "
-                                       f"ROUTER_HOME={shlex.quote(str(home / 'router'))}")
-                    else:
-                        environment = f"CLAUDE_HOME={shlex.quote(str(home))}"
-                    hook["command"] = f"{environment} python3 {shlex.quote(str(home / 'hooks/router' / script))}"
+    for blocks in additions.values():
+        for block in blocks:
+            for hook in block["hooks"]:
+                script = re.search(r"([a-z_]+\.py)\"?$", hook["command"])[1]
+                hook.update(hook_command(host, home, script, "warn", WINDOWS))
     hooks = config.setdefault("hooks", {})
     # Replace exact, installer-owned old registrations when the matcher changes.
     # Leaving both installed would count every read twice after an upgrade.
@@ -613,12 +729,12 @@ def run(preflight=False):
     created_dirs = list(manifest.get("created_dirs", []))
     for folder in sorted(candidates, key=lambda path: len(path.parts)):
         if not folder.exists() and not folder.is_symlink():
-            relative = str(folder.relative_to(home))
+            relative = folder.relative_to(home).as_posix()
             if relative not in created_dirs:
                 created_dirs.append(relative)
     sibling = harness_manifest() or {}
     # A folder the sibling created that holds a path Router writes goes when the last tool leaves.
-    held = {str(parent) for relative in [*files, *links, settings.name, "router/install-manifest.json"]
+    held = {parent.as_posix() for relative in [*files, *links, settings.name, "router/install-manifest.json"]
             for parent in Path(relative).parents}
     sibling_dirs = sibling.get("created_dirs") if isinstance(sibling.get("created_dirs"), list) else (
         old_install_dirs(sibling) if "created_dirs" not in sibling else [])
@@ -627,6 +743,7 @@ def run(preflight=False):
     for target, payload in writes:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_symlink():
+            writable(target)
             target.unlink()
         if isinstance(payload, Path):
             executable = target.parent == home / "router/bin" or bool(payload.stat().st_mode & 0o111)
@@ -634,15 +751,20 @@ def run(preflight=False):
             try:
                 with os.fdopen(descriptor, "wb") as handle, open(payload, "rb") as source_file:
                     shutil.copyfileobj(source_file, handle)
-                os.chmod(name, 0o755 if executable else 0o644)
+                set_mode(name, 0o755 if executable else 0o644)
+                writable(target)
                 os.replace(name, target)
             except BaseException:
                 if os.path.exists(name):
                     os.unlink(name)
                 raise
         else:
+            if target.is_file() and not target.is_symlink():
+                writable(target)
+                target.unlink()  # A copy from an install without symlink privilege; checked as Router's above.
             target.symlink_to(payload)
     for target in stale:
+        writable(target)
         target.unlink()
         print(f"Removed no-longer-shipped: {target}")
     for target in kept_old:
@@ -708,10 +830,10 @@ def run(preflight=False):
         write_json(manifest_path, result)
     # Backups can hold secrets; one an older release left with the settings' mode becomes private too.
     for path in sorted(home.iterdir()):
-        if (fnmatch.fnmatchcase(path.name, "*.router-backup-*") and regular_file(path)
+        if (POSIX_MODES and fnmatch.fnmatchcase(path.name, "*.router-backup-*") and regular_file(path)
                 and stat.S_IMODE(path.lstat().st_mode) != 0o600):
             try:
-                os.chmod(path, 0o600)
+                set_mode(path, 0o600)
             except OSError:
                 continue
             print(f"Made backup private (0600): {path}")

@@ -5,6 +5,7 @@ source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 fresh_home="$(mktemp -d)"
 trap 'rm -rf -- "$fresh_home"' EXIT
 export HOME="$fresh_home"
+if [[ -n ${MSYSTEM:-} ]]; then export USERPROFILE="$(cygpath -w "$fresh_home")"; fi
 unset CLAUDE_HOME ROUTES_JSON
 while IFS= read -r variable; do
   unset "$variable"
@@ -16,7 +17,9 @@ export XDG_CACHE_HOME="$HOME/.cache"
 export PYTHONDONTWRITEBYTECODE=1
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
-python3 - "$source_root" <<'PY'
+# pyrun.sh picks the interpreter the hooks use: python3, python or py -3, never the Store stub.
+python=$("$BASH" "$source_root/hooks/router/pyrun.sh" --find router)
+"$python" - "$source_root" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -25,6 +28,8 @@ import subprocess
 import sys
 
 root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tests"))
+from _platform import BASH, POSIX_MODES, posix  # noqa: E402
 home = Path.home()
 codex = Path(os.environ["CODEX_HOME"])
 
@@ -43,12 +48,12 @@ def run(command, *, environment=None, input_text=None, expected=0):
 
 
 def install(*options, environment=None, expected=0):
-    return run(["bash", str(root / "install.sh"), "--host", "codex", *options],
+    return run([BASH, posix(root / "install.sh"), "--host", "codex", *options],
                environment=environment, expected=expected)
 
 
 def tree_snapshot(path):
-    return {str(item.relative_to(path)): item.read_bytes()
+    return {item.relative_to(path).as_posix(): item.read_bytes()
             for item in path.rglob("*") if item.is_file()}
 
 
@@ -71,19 +76,19 @@ def assert_routing(folder, environment):
              "message": "gAAAA-encrypted-test"}}
     config = json.loads((folder / "hooks.json").read_text())
     command = router_hook(config)
-    allowed = run(["bash", "-c", command], environment=environment, input_text=json.dumps(event))
+    allowed = run([BASH, "-c", command], environment=environment, input_text=json.dumps(event))
     check(not allowed.stderr, f"installed Codex guard wrote an error: {allowed.stderr}")
     output = json.loads(allowed.stdout) if allowed.stdout else {}
     check(output.get("hookSpecificOutput", {}).get("permissionDecision") != "deny", "sweep spawn was denied")
     blocked_event = dict(event, tool_input=dict(event["tool_input"], agent_type="worker-up"))
-    denied = run(["bash", "-c", command], environment=environment,
+    denied = run([BASH, "-c", command], environment=environment,
                  input_text=json.dumps(blocked_event), expected=2)
     check("known `route: up <code>`" in denied.stderr, "installed guard bypassed the up-code check")
     for model in ("gpt-6-astra", "claude-opus-5-5"):
         for directive in ("", "\nroute: up novel"):
             upper = dict(event, tool_input=dict(event["tool_input"], agent_type="unlisted-role",
                                                model=model, message="encrypted:test" + directive))
-            denied = run(["bash", "-c", command], environment=environment,
+            denied = run([BASH, "-c", command], environment=environment,
                          input_text=json.dumps(upper), expected=2)
             check("known `route: up <code>`" in denied.stderr,
                   "installed guard bypassed the top-tier model check")
@@ -93,25 +98,25 @@ def assert_routing(folder, environment):
     mode_path.write_text(json.dumps(routes))
     for fields in ({"agent_type": "unknown-role"}, {}, {"agent_type": "builder", "model": "gpt-6-astra"}):
         disabled_event = dict(event, tool_input=dict(fields, task_name="mode-check", message="encrypted:test"))
-        result = run(["bash", "-c", command], environment=dict(environment, ROUTES_JSON=str(mode_path)),
+        result = run([BASH, "-c", command], environment=dict(environment, ROUTES_JSON=str(mode_path)),
                      input_text=json.dumps(disabled_event))
         check(not result.stdout and not result.stderr, "installed guard ignored disabled router modes")
     mode_path.unlink()
     cli = folder / "router/bin/router"
-    check(run([str(cli), "status"], environment=environment).stdout.startswith("on\n"), "Codex CLI status failed")
-    run([str(cli), "off"], environment=environment)
+    check(run([BASH, posix(cli), "status"], environment=environment).stdout.startswith("on\n"), "Codex CLI status failed")
+    run([BASH, posix(cli), "off"], environment=environment)
     check((home / ".local/state/claude-router/OFF").is_file(), "Codex did not use the shared switch location")
     # A permitted sweep is silent even when routing is on. Use the denied spawn
     # to prove the OFF file actually bypasses the installed guard.
-    disabled = run(["bash", "-c", command], environment=environment, input_text=json.dumps(blocked_event))
+    disabled = run([BASH, "-c", command], environment=environment, input_text=json.dumps(blocked_event))
     check(not disabled.stdout and not disabled.stderr, "Codex routing was active with router off")
-    run([str(cli), "on"], environment=environment)
+    run([BASH, posix(cli), "on"], environment=environment)
     check(not (home / ".local/state/claude-router/OFF").exists(), "router on did not remove the shared switch")
-    denied = run(["bash", "-c", command], environment=environment,
+    denied = run([BASH, "-c", command], environment=environment,
                  input_text=json.dumps(blocked_event), expected=2)
     check("known `route: up <code>`" in denied.stderr, "Codex routing did not resume after router on")
     disabled_env = dict(environment, ROUTER_OFF="1")
-    disabled = run(["bash", "-c", command], environment=disabled_env, input_text=json.dumps(blocked_event))
+    disabled = run([BASH, "-c", command], environment=disabled_env, input_text=json.dumps(blocked_event))
     check(not disabled.stdout and not disabled.stderr, "Codex ignored ROUTER_OFF=1")
 
 
@@ -191,7 +196,11 @@ try:
     purge_env = dict(os.environ, CODEX_HOME=str(purge_home), ROUTER_STATE=str(home / "purge-state"))
     install(environment=purge_env)
     backups = list(purge_home.glob("hooks.json.router-backup-*"))
-    check(len(backups) == 1 and backups[0].stat().st_mode & 0o777 == 0o600, "Codex install backup missing or not 0600")
+    check(len(backups) == 1, "Codex install backup missing")
+    if POSIX_MODES:
+        check(backups[0].stat().st_mode & 0o777 == 0o600, "Codex install backup not 0600")
+    else:
+        print("SKIP backup mode check: native Windows has no POSIX file modes")
     kept = {name: data for name, data in tree_snapshot(purge_home).items() if ".router-backup-" not in name}
     purged = install("--purge", environment=purge_env)
     check(f"Removed backup: {backups[0]}" in purged.stdout, "Codex --purge did not list the backup")

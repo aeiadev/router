@@ -22,9 +22,12 @@ OWNER = {"name": "AEIA", "url": "https://aeia.dev"}
 REPOSITORY = "https://github.com/aeiadev/router"
 MANAGED = (".claude-plugin", "plugins")
 CODEX_ONLY = frozenset(("codex_spawn_guard.py",))  # Plugins are Claude Code only.
-SCRIPT = re.compile(r'python3 "\$HOME/\.claude/hooks/router/([a-z_]+\.py)"')
+# Windows keeps no execute bit: its Python reports one only for .exe, .bat, .cmd and .com files,
+# so there --check compares bytes alone.
+EXEC_BITS = os.name != "nt"
+SCRIPT = re.compile(r'sh "\$HOME/\.claude/hooks/router/pyrun\.sh" router warn ([a-z_]+\.py)')
 GUARD = ('[ -e "${{CLAUDE_HOME:-$HOME/.claude}}/router/install-manifest.json" ] || '
-         'python3 "${{CLAUDE_PLUGIN_ROOT}}/hooks/router/{script}"')
+         'sh "${{CLAUDE_PLUGIN_ROOT}}/hooks/router/pyrun.sh" router warn {script}')
 ROUTER_DESCRIPTION = ("Routing hooks, tier agents, the dispatch skill and the router command: bounded "
                       "subagent tasks go to the model that fits them and each result to a fresh judge.")
 SHARED_DESCRIPTION = ("Nine base agent roles: sweeper, researcher, planner, builder, builder-in-place, "
@@ -147,7 +150,8 @@ def drift(wanted, present):
             result.append((relative, "not a file"))
         else:
             data, executable = wanted[relative]
-            if (ROOT / relative).read_bytes() != data or bool(present[relative].st_mode & 0o100) != executable:
+            if (ROOT / relative).read_bytes() != data or (
+                    EXEC_BITS and bool(present[relative].st_mode & 0o100) != executable):
                 result.append((relative, "changed"))
     return result
 

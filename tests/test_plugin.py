@@ -7,6 +7,7 @@ ROUTER_LOCAL are pinned, and no path depends on the length or name of TMPDIR.
 """
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,8 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, posix  # noqa: E402
 sys.path.insert(0, str(ROOT / "hooks/router"))
 import common  # noqa: E402
 
@@ -28,8 +31,8 @@ VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 BASE_ROLES = ("builder", "builder-in-place", "docs-writer", "judge", "planner", "researcher",
               "sweeper", "test-writer", "worker")
 GUARD = re.compile(r'\[ -e "\$\{CLAUDE_HOME:-\$HOME/\.claude\}/router/install-manifest\.json" \] \|\| '
-                   r'python3 "\$\{CLAUDE_PLUGIN_ROOT\}/hooks/router/([a-z_]+\.py)"')
-SCRIPT_INSTALL = re.compile(r'python3 "\$HOME/\.claude/hooks/router/([a-z_]+\.py)"')
+                   r'sh "\$\{CLAUDE_PLUGIN_ROOT\}/hooks/router/pyrun\.sh" router warn ([a-z_]+\.py)')
+SCRIPT_INSTALL = re.compile(r'sh "\$HOME/\.claude/hooks/router/pyrun\.sh" router warn ([a-z_]+\.py)')
 BRIEF = "TASK: Sweep the repository\nRETURN: Report findings"
 OWNER = {"name": "AEIA", "url": "https://aeia.dev"}
 REPOSITORY = "https://github.com/aeiadev/router"
@@ -54,7 +57,7 @@ def tree_hash(path):
 
 def generated_files(root):
     """Relative names of every file under .claude-plugin/ and plugins/ of a checkout."""
-    return sorted(str(path.relative_to(root)) for folder in (".claude-plugin", "plugins")
+    return sorted(path.relative_to(root).as_posix() for folder in (".claude-plugin", "plugins")
                   for path in (root / folder).rglob("*")
                   if (path.is_file() or path.is_symlink()) and "__pycache__" not in path.parts and path.suffix != ".pyc")
 
@@ -93,7 +96,7 @@ class Scratch(unittest.TestCase):
         return folder
 
     def install(self, env=None, *options):
-        result = subprocess.run(["bash", str(ROOT / "install.sh"), "--host", "claude", *options],
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--host", "claude", *options],
                                 env=env or self.env, capture_output=True, text=True,
                                 stdin=subprocess.DEVNULL, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -179,6 +182,18 @@ class Generated(Scratch):
         self.assertEqual(again.stdout, f"gen_plugin: {count} generated files (0 written, 0 removed)\n")
         self.assertEqual(self.gen(repo, "--check").returncode, 0)
 
+    def test_execute_bit_counts_only_where_the_os_keeps_it(self):
+        # Windows Python reports no execute bit for an extensionless file such as bin/router, so there
+        # --check compares bytes only; elsewhere a lost bit is drift.
+        repo = self.copy_repo()
+        os.chmod(repo / "plugins/router/bin/router", 0o644)
+        spec = importlib.util.spec_from_file_location("gen_plugin_copy", repo / "scripts/gen_plugin.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for exec_bits, wanted in ((True, [("plugins/router/bin/router", "changed")]), (False, [])):
+            with self.subTest(exec_bits=exec_bits), mock.patch.object(module, "EXEC_BITS", exec_bits):
+                self.assertEqual(module.drift(module.expected(), module.actual()), wanted)
+
     def test_marketplace_and_plugin_manifests(self):
         marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
         self.assertEqual(marketplace, {"name": "router", "owner": OWNER, "plugins": [
@@ -241,7 +256,10 @@ class Generated(Scratch):
         for name, source in sources.items():
             self.assertEqual((ROOT / name).read_bytes(), (ROOT / source).read_bytes(), name)
             self.assertEqual(bool((ROOT / name).stat().st_mode & 0o100), bool((ROOT / source).stat().st_mode & 0o100), name)
-        self.assertTrue((ROOT / "plugins/router/bin/router").stat().st_mode & 0o100)
+        if os.name == "nt":
+            print("skip: a Windows checkout carries no exec bit", file=sys.stderr)
+        else:
+            self.assertTrue((ROOT / "plugins/router/bin/router").stat().st_mode & 0o100)
 
 
 # Fix 2: every plugin hook stands down when a script install exists.
@@ -552,7 +570,7 @@ class Prefixes(Scratch):
 # Fix 4: install.sh --status reports plugin state, read-only.
 class Status(Scratch):
     def status(self, *options):
-        return subprocess.run(["bash", str(ROOT / "install.sh"), "--status", *options], env=self.env,
+        return subprocess.run([BASH, posix(ROOT / "install.sh"), "--status", *options], env=self.env,
                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
 
     def lines(self, *options):

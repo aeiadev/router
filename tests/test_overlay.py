@@ -26,6 +26,7 @@ class OverlayTests(unittest.TestCase):
         self.tmp = Path(temp.name)
         self.local = self.tmp / "config/router/routes.local.json"
         self.env = patch.dict(os.environ, HOME=str(self.tmp), ROUTER_LOCAL=str(self.local),
+                              XDG_CONFIG_HOME="",
                               ROUTER_STATE=str(self.tmp / "state"), ROUTER_OFF_FILE=str(self.tmp / "OFF"),
                               ROUTES_JSON=str(common.ROUTES_PATH))
         self.env.start()
@@ -201,10 +202,20 @@ class OverlayTests(unittest.TestCase):
         self.assertIsNotNone(re.fullmatch(re.escape(f"overlay invalid: {self.local}: nested too deeply\n"), result.stderr), result.stderr)
 
     def test_overlay_too_deep_to_merge_falls_back(self):
-        # 1100 levels parse, then the merge itself raises RecursionError.
+        # On Python 3.12+ 1100 levels parse, then the merge itself raises RecursionError. Before 3.12
+        # json counts against the same recursion limit, so the parse fails first; both fall back alike.
         self.local.parent.mkdir(parents=True, exist_ok=True)
         self.local.write_text('{"a":' * 1100 + "1" + "}" * 1100, encoding="utf-8")
-        self.assertIsInstance(overlay.read_patch(self.local), dict)
+        if sys.version_info >= (3, 12):
+            self.assertIsInstance(overlay.read_patch(self.local), dict)
+        else:
+            with self.assertRaisesRegex(overlay.OverlayError, re.escape(f"{self.local}: nested too deeply") + r"\Z"):
+                overlay.read_patch(self.local)
+        deep = 1
+        for _ in range(1100):
+            deep = {"a": deep}
+        with self.assertRaises(RecursionError):
+            overlay.merge({}, deep)
         self.assert_falls_back("merge-deep", "nested too deeply")
         record = json.loads((self.tmp / "state-merge-deep/errors.jsonl").read_text())
         self.assertEqual(set(record) - {"ts"}, {"script", "file", "error"})
@@ -214,8 +225,8 @@ class OverlayTests(unittest.TestCase):
                          (1, "", f"overlay invalid: {self.local}: nested too deeply\n"))
 
     def test_unsearchable_default_directory_is_not_absent(self):
-        if os.geteuid() == 0:
-            self.skipTest("root ignores modes")
+        if os.name == "nt" or os.geteuid() == 0:
+            self.skipTest("root and NTFS ignore modes")
         os.environ.pop("ROUTER_LOCAL")
         default = self.tmp / ".config/router/routes.local.json"
         default.parent.mkdir(parents=True)
@@ -225,8 +236,8 @@ class OverlayTests(unittest.TestCase):
                                           self.cli("path").stdout), self.cli("path").stdout)
 
     def test_unreadable_file_and_directory_fall_back(self):
-        if os.geteuid() == 0:
-            self.skipTest("root ignores modes")
+        if os.name == "nt" or os.geteuid() == 0:
+            self.skipTest("root and NTFS ignore modes")
         self.write({"context": {"chain": {"first": 3}}})
         self.local.chmod(0)
         self.addCleanup(self.local.chmod, 0o600)
@@ -261,7 +272,7 @@ class OverlayTests(unittest.TestCase):
         home = self.tmp / "claude"
         with self.assertRaises(ValueError) as caught:
             common.plan_defaults(home, "claude", {"created": "yes"}, "block")
-        self.assertEqual(str(caught.exception), f"{home}/router/install-manifest.json: invalid defaults ownership")
+        self.assertEqual(str(caught.exception), f"{home / 'router/install-manifest.json'}: invalid defaults ownership")
         (home / "router").mkdir(parents=True)
         manifest = home / "router/install-manifest.json"
         manifest.write_text("[]", encoding="utf-8")
@@ -356,7 +367,7 @@ class OverlayTests(unittest.TestCase):
             common.fail_open("file-hook", OSError(2, "missing", str(bad)))
         record = json.loads((self.tmp / "state/errors.jsonl").read_text().splitlines()[-1])
         self.assertEqual(record["file"], str(bad))
-        self.assertIn(str(bad), record["message"])
+        self.assertIn(repr(str(bad)), record["message"])  # OSError text shows the path as its repr
 
     def test_defaults_marker_and_manifest_name_file(self):
         home = self.tmp / "claude"
@@ -388,8 +399,11 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(self.cli("path").stdout, f"{self.local}\ninvalid: overlay file not found\n")
         result = self.cli("set", "context.chain.first", "8")
         self.assertEqual((result.returncode, result.stdout), (0, "context.chain.first = 8\n"))
-        self.assertEqual(self.local.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.local.parent.stat().st_mode & 0o777, 0o700)
+        if os.name == "nt":
+            print("skip: NTFS keeps no POSIX modes, so the 0600/0700 check cannot apply", file=sys.stderr)
+        else:
+            self.assertEqual(self.local.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.local.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(self.cli("get", "context.chain.first").stdout, "8\n")
         before = self.local.read_bytes()
         bad = self.cli("set", "context.caps.exec", "-1")

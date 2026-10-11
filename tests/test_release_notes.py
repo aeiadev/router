@@ -4,10 +4,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, posix  # noqa: E402
 SCRIPT = ROOT / "scripts/release-notes.sh"
 
 class ReleaseNotesTests(unittest.TestCase):
@@ -20,7 +23,7 @@ class ReleaseNotesTests(unittest.TestCase):
                         XDG_CONFIG_HOME=str(Path(self.temp.name) / "config"), ROUTER_LOCAL="off")
 
     def run_script(self, *args):
-        return subprocess.run(["bash", str(SCRIPT), *map(str, args)], env=self.env,
+        return subprocess.run([BASH, posix(SCRIPT), *map(str, args)], env=self.env,
                               text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
 
     def assert_message(self, actual, expected):
@@ -57,10 +60,11 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assert_message(result.stderr, f"release-notes: {missing}: cannot read\n")
 
     def test_system_bash_when_it_is_older_than_four(self):
-        system_bash = Path("/bin/bash")
+        system_bash = Path("/bin/bash") if Path("/bin/bash").is_file() else Path(BASH)  # Windows: Git Bash
         version = subprocess.run([str(system_bash), "-c", "printf %s \"${BASH_VERSINFO[0]}\""],
                                  stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=10)
         if version.returncode != 0 or int(version.stdout) >= 4:
+            print(f"SKIP {self.id()}: /bin/bash is not older than 4", file=sys.stderr, flush=True)
             self.skipTest("/bin/bash is not older than 4")
         result = subprocess.run([str(system_bash), str(SCRIPT), "0.2.0", str(self.changelog)],
                                 env=self.env, stdin=subprocess.DEVNULL, text=True,

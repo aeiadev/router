@@ -25,7 +25,9 @@ SHARED_ROLES = frozenset(
                  "judge", "worker", "test-writer", "docs-writer")
     for ext in (".md", ".toml")
 )
-HOOK_RE = re.compile(r"/hooks/router/([A-Za-z_][A-Za-z_0-9]*\.py)")
+# A hook names its script as pyrun.sh" router <mode> <name>.py (0.3.1) or /hooks/router/<name>.py (before).
+HOOK_RE = re.compile(r"""pyrun\.sh["']?\s+router\s+(?:warn|block|status)\s+["']?([A-Za-z_][A-Za-z_0-9]*\.py)"""
+                     r"|/hooks/router/([A-Za-z_][A-Za-z_0-9]*\.py)")
 VERSION_RE = re.compile(r"[0-9A-Za-z.+-]{1,40}")
 
 
@@ -96,6 +98,8 @@ def _harness_manifest(path):
         if (not isinstance(value, dict) or value.get("version") != 1
                 or not isinstance(value.get("files"), dict) or not isinstance(value.get("hooks"), dict)):
             return None
+        # Old Windows installers recorded native separators; shared role names use slashes.
+        value["files"] = {name.replace("\\", "/"): digest for name, digest in value["files"].items()}
         for relative, digest in value["files"].items():
             if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
                 return None
@@ -112,6 +116,7 @@ def _manifest(path):
     value, error = _read_json(path)
     if error or not isinstance(value, dict) or not isinstance(value.get("files"), dict):
         return None, "unknown"
+    value["files"] = {name.replace("\\", "/"): digest for name, digest in value["files"].items()}
     return value, None
 
 
@@ -121,7 +126,7 @@ def _commands(value):
         if isinstance(node, dict):
             for key, item in node.items():
                 if key == "command" and isinstance(item, str):
-                    found.extend(HOOK_RE.findall(item))
+                    found.extend(launched or named for launched, named in HOOK_RE.findall(item))
                 elif isinstance(item, (dict, list)):
                     visit(item)
         elif isinstance(node, list):
@@ -251,7 +256,7 @@ def _budget(home, host, root):
         return [("warn", "unavailable (scripts/budget.py is missing)")]
     try:
         timeout = float(os.environ.get("ROUTER_DOCTOR_BUDGET_TIMEOUT", "10"))
-        result = subprocess.run([sys.executable, str(script), "--home", str(home), "--host", host, "--json"],
+        result = subprocess.run([sys.executable, "-B", str(script), "--home", str(home), "--host", host, "--json"],
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
         if result.returncode:
             raise ValueError("budget exited unsuccessfully")
@@ -269,6 +274,22 @@ def _budget(home, host, root):
         return [("warn", "unavailable (scripts/budget.py failed)")]
 
 
+def _router_on_path(command, windows=os.name == "nt"):
+    """True when `router` run from PATH is COMMAND. Windows Python's shutil.which() skips the
+    extensionless router that Git Bash runs, so there the first PATH folder holding a file named
+    router decides, compared by samefile because PATH may spell the folder with either slash."""
+    if not windows:
+        return shutil.which("router") == str(command)
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(folder, "router")
+        if folder and os.path.isfile(candidate):
+            try:
+                return os.path.samefile(candidate, command)
+            except OSError:
+                return False
+    return False
+
+
 def _report(host, home, root):
     print(f"Router doctor ({host}): {home}")
     result = []
@@ -277,13 +298,13 @@ def _report(host, home, root):
     version = python_version()
     version_text = ".".join(map(str, version))
     executable = sys.executable
-    emit("ok" if version >= (3, 10) else "FAIL", "python",
-         f"{version_text} ({executable})" if version >= (3, 10) else
-         f"{version_text} at {executable}, need 3.10 or newer")
+    emit("ok" if version >= (3, 9) else "FAIL", "python",
+         f"{version_text} ({executable})" if version >= (3, 9) else
+         f"{version_text} at {executable}, need 3.9 or newer")
     command = home / "router/bin/router"
-    emit("ok" if shutil.which("router") == str(command) else "warn", "path",
-         f"router found at {command}" if shutil.which("router") == str(command) else
-         f"{home / 'router/bin'} is not on PATH")
+    on_path = _router_on_path(command)
+    emit("ok" if on_path else "warn", "path",
+         f"router found at {command}" if on_path else f"{home / 'router/bin'} is not on PATH")
     manifest_path = home / "router/install-manifest.json"
     manifest, condition = _manifest(manifest_path)
     if condition == "absent":
@@ -470,7 +491,7 @@ def main(argv):
     parser.add_argument("--host", choices=("claude", "codex"))
     args = parser.parse_args(argv)
     homes = {"claude": common.claude_home(),
-             "codex": Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()}
+             "codex": common.compat.expanduser(os.environ.get("CODEX_HOME") or common.compat.home() / ".codex")}
     selected = [args.host] if args.host else [host for host, home in homes.items()
                                                if _exists(home / "router/install-manifest.json")]
     if not selected:

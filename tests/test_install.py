@@ -7,11 +7,23 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, can_symlink, home_env, posix, posix_modes, python_shim, shim, skip_unless_symlinks  # noqa: E402
+
+
+import _released_python
+
+RELEASED_PYTHON = []  # one shim folder whose python3 is verified as 3.10 or newer
+
+
+def released_env(env):
+    return _released_python.released_env(env, RELEASED_PYTHON)
 
 
 class InstallerTests(unittest.TestCase):
@@ -24,21 +36,165 @@ class InstallerTests(unittest.TestCase):
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith("ROUTER_") and key not in
                     ("CLAUDE_HOME", "CODEX_HOME", "ROUTES_JSON")}
-        self.env.update(HOME=str(self.home), PATH=str(self.path),
+        self.env.update(**home_env(self.home), PATH=str(self.path),
                         XDG_STATE_HOME=str(self.home / ".local/state"),
                         XDG_CONFIG_HOME=str(self.home / ".config"), ROUTER_LOCAL="off",
                         PYTHONDONTWRITEBYTECODE="1")
         self.assertTrue(all(name in self.env for name in ("HOME", "XDG_CONFIG_HOME", "ROUTER_LOCAL")))
-        self.shell = shutil.which("bash")
-        for command in ("python3", "git", "dirname"):
-            (self.path / command).symlink_to(shutil.which(command))
+        self.shell = BASH
+        python_shim(self.path)
+        for command in ("git", "dirname", "sh"):  # hook commands run sh pyrun.sh
+            shim(self.path, command, shutil.which(command))
 
     def install(self, *options, expected=0):
-        result = subprocess.run([self.shell, str(ROOT / "install.sh"), *options],
+        result = subprocess.run([self.shell, posix(ROOT / "install.sh"), *options],
                                 env=self.env, text=True, capture_output=True,
                                 stdin=subprocess.DEVNULL, timeout=40)
         self.assertEqual(result.returncode, expected, result.stderr)
         return result
+
+    def test_home_comes_from_HOME_when_python_reads_USERPROFILE(self):
+        """Windows Python's Path.home() reads USERPROFILE only; Git Bash and Claude Code use HOME.
+        A sitecustomize makes Path.home() behave that way here, so this runs on every OS."""
+        sim = self.home / "sim"
+        sim.mkdir()
+        (sim / "sitecustomize.py").write_text(
+            "import os, pathlib\npathlib.Path.home = classmethod(lambda cls: cls(os.environ['USERPROFILE']))\n")
+        profile = self.home / "profile"
+        profile.mkdir()
+        self.env.update(USERPROFILE=str(profile),
+                        PYTHONPATH=os.pathsep.join(filter(None, (str(sim), self.env.get("PYTHONPATH")))))
+        self.install("--host", "claude")
+        self.assert_hosts("claude")
+        self.assertEqual(sorted(profile.iterdir()), [])
+
+    def test_two_backups_in_one_tick_keep_distinct_names(self):
+        """Windows Python 3.12 time_ns() moves in coarse ticks: the original's copy and the current settings'
+        backup, taken in one run, must not share a name. A sitecustomize freezes the clock on every OS."""
+        sim = self.home / "frozen"
+        sim.mkdir()
+        (sim / "sitecustomize.py").write_text("import time\ntime.time_ns = lambda: 1700000000000000000\n")
+        claude = self.home / ".claude"
+        (claude / "harness").mkdir(parents=True)
+        original, current = b'{"original": true}\n', b'{"current": true}\n'
+        (claude / "settings.json.harness-backup-1").write_bytes(original)
+        (claude / "settings.json").write_bytes(current)
+        (claude / "harness/install-manifest.json").write_text(json.dumps({
+            "version": 1, "package": "0.3.1", "files": {}, "hooks": {}, "settings_original_existed": True,
+            "settings_original_backup": "settings.json.harness-backup-1",
+            "settings_original_sha256": hashlib.sha256(original).hexdigest(), "settings_original_mode": 0o600}))
+        self.env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(sim), self.env.get("PYTHONPATH"))))
+        self.install("--host", "claude")
+        backups = sorted(claude.glob("settings.json.router-backup-*"))
+        self.assertEqual(sorted(path.read_bytes() for path in backups), sorted([original, current]), backups)
+
+    def test_harness_manifest_with_backslash_keys_still_claims_its_roles(self):
+        """Harness 0.2 on Windows recorded its roles as agents\\name; Router must still see the claim and keep
+        the role it does not own, instead of refusing to overwrite it."""
+        role = self.home / ".claude/agents/builder-in-place.md"
+        role.parent.mkdir(parents=True)
+        role.write_bytes(b"0.2-era role text\n")
+        sibling = self.home / ".claude/harness/install-manifest.json"
+        sibling.parent.mkdir(parents=True)
+        for separator in ("/", "\\"):
+            with self.subTest(separator=separator):
+                key = "agents" + separator + "builder-in-place.md"
+                sibling.write_text(json.dumps({"version": 1, "package": "0.2.0", "hooks": {},
+                                               "files": {key: hashlib.sha256(role.read_bytes()).hexdigest()}}))
+                self.install("--host", "claude")
+                self.assertEqual(role.read_bytes(), b"0.2-era role text\n")
+
+    def test_manifest_written_with_backslashes_is_read_with_both_separators(self):
+        """A 0.2 install on Windows wrote manifest paths with a backslash; the next install and uninstall read both."""
+        self.install("--host", "claude")
+        path = self.home / ".claude/router/install-manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["files"] = {key.replace("/", "\\"): value for key, value in manifest["files"].items()}
+        manifest["created_dirs"] = [item.replace("/", "\\") for item in manifest.get("created_dirs", [])]
+        self.assertTrue(any("\\" in key for key in manifest["files"]))
+        path.write_text(json.dumps(manifest))
+        second = self.install("--host", "claude")
+        self.assertNotIn("Keeping", second.stdout)
+        self.install("--host", "claude", "--uninstall")
+        self.assert_hosts()
+        self.assertFalse((self.home / ".claude/hooks/router").exists())
+
+    @skip_unless_symlinks("installed router/common.py, compat.py and routes.json are links")
+    def test_installed_links_resolve_and_slash_spelled_links_are_respelled(self):
+        """Windows leaves a relative link spelled with "/" dangling: the installer writes the native
+        separator, respells a link an earlier install wrote with "/", and uninstall removes either."""
+        claude = self.home / ".claude"
+        record = claude / "router/install-manifest.json"
+        names = ("common.py", "compat.py", "routes.json")
+
+        def assert_resolved():
+            manifest = json.loads(record.read_text())
+            for name in names:
+                path = claude / "router" / name
+                self.assertTrue(path.is_symlink(), name)
+                self.assertEqual(os.readlink(path), os.path.join("..", "hooks", "router", name))
+                self.assertEqual(path.read_bytes(), (ROOT / "hooks/router" / name).read_bytes(), name)
+                self.assertEqual(manifest["files"]["router/" + name], {"link": os.readlink(path)})
+
+        self.install("--host", "claude")
+        assert_resolved()
+        manifest = json.loads(record.read_text())
+        for name in names:  # as 0.3.0 wrote them
+            (claude / "router" / name).unlink()
+            (claude / "router" / name).symlink_to("../hooks/router/" + name)
+            manifest["files"]["router/" + name] = {"link": "../hooks/router/" + name}
+        record.write_text(json.dumps(manifest))
+        self.install("--host", "claude")
+        assert_resolved()
+        removed = self.install("--host", "claude", "--uninstall")
+        self.assertNotIn("Preserving modified file", removed.stdout)
+        for name in names:
+            self.assertFalse((claude / "router" / name).is_symlink(), name)
+
+    def test_links_become_copies_without_symlink_privilege_and_round_trip(self):
+        """Windows without Developer Mode cannot create symlinks: the shipped links install as copies the
+        manifest records by sha256, and upgrade and uninstall handle both forms. A sitecustomize makes
+        os.symlink fail here, so this runs on every OS."""
+        sim = self.home / "nolinks"
+        sim.mkdir()
+        (sim / "sitecustomize.py").write_text(
+            "import os\ndef _denied(*args, **kwargs):\n"
+            "    raise OSError(1314, 'A required privilege is not held by the client')\n"
+            "os.symlink = _denied\n")
+        blocked = dict(self.env, PYTHONPATH=os.pathsep.join(filter(None, (str(sim), self.env.get("PYTHONPATH")))))
+        links = {"router/common.py": "hooks/router/common.py", "router/compat.py": "hooks/router/compat.py",
+                 "router/routes.json": "hooks/router/routes.json"}
+        claude = self.home / ".claude"
+
+        def install(env, *options):
+            result = subprocess.run([self.shell, posix(ROOT / "install.sh"), "--host", "claude", *options],
+                                    env=env, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=40)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return json.loads((claude / "router/install-manifest.json").read_text()) if not options else None
+
+        def assert_copies(manifest):
+            for relative, source in links.items():
+                path = claude / relative
+                self.assertFalse(path.is_symlink(), relative)
+                self.assertEqual(path.read_bytes(), (ROOT / source).read_bytes(), relative)
+                self.assertEqual(manifest["files"][relative],
+                                 {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()}, relative)
+
+        assert_copies(install(blocked))
+        assert_copies(install(blocked))
+        manifest = install(self.env)
+        if can_symlink():
+            for relative in links:
+                self.assertTrue((claude / relative).is_symlink(), relative)
+                self.assertEqual(manifest["files"][relative], {"link": os.path.join("..", *links[relative].split("/"))})
+        else:
+            print(f"SKIP {self.id()} symlink assertions: this user cannot create symlinks; copy lifecycle still checked",
+                  file=sys.stderr, flush=True)
+        assert_copies(install(blocked))
+        install(blocked, "--uninstall")
+        self.assert_hosts()
+        for relative in links:
+            self.assertFalse((claude / relative).exists() or (claude / relative).is_symlink(), relative)
 
     def assert_hosts(self, *names):
         for host in ("claude", "codex"):
@@ -62,7 +218,7 @@ class InstallerTests(unittest.TestCase):
         self.install("--host", "both")
         for host in ("claude", "codex"):
             value = json.loads((self.home / ("." + host) / "router/install-manifest.json").read_text())
-            self.assertEqual(value["package"], "0.3.0")
+            self.assertEqual(value["package"], (ROOT / "VERSION").read_text().strip())
 
     def test_both_preflights_codex_before_claude_writes(self):
         claude = self.home / ".claude"
@@ -306,8 +462,8 @@ class InstallerTests(unittest.TestCase):
     def v02_install(self, *options):
         tree = os.environ.get("ROUTER_V02")
         self.assertTrue(tree, "ROUTER_V02 is unset; source old-trees.sh")
-        result = subprocess.run([self.shell, str(Path(tree) / "install.sh"), *options],
-                                env=self.env, text=True, capture_output=True,
+        result = subprocess.run([self.shell, posix(Path(tree) / "install.sh"), *options],
+                                env=released_env(self.env), text=True, capture_output=True,
                                 stdin=subprocess.DEVNULL, timeout=40)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -326,13 +482,17 @@ class InstallerTests(unittest.TestCase):
             manifest = json.loads((self.home / ("." + host) / "router/install-manifest.json").read_text())
             self.assertEqual(len(old[host]), 1, host)
             self.assertEqual([manifest.get(key) for key in ("settings_original_existed", "settings_original_backup",
-                                                             "settings_original_sha256", "settings_original_mode")],
-                             [True, old[host][0].name, hashlib.sha256(original).hexdigest(), 0o644], host)
+                                                             "settings_original_sha256")],
+                             [True, old[host][0].name, hashlib.sha256(original).hexdigest()], host)
+            if posix_modes(self, "recorded settings mode"):
+                self.assertEqual(manifest.get("settings_original_mode"), 0o644, host)
         self.install("--host", "both", "--uninstall")
         for host, filename in names:
             with self.subTest(host=host):
                 path = self.home / ("." + host) / filename
-                self.assertEqual((path.read_bytes(), oct(path.stat().st_mode & 0o777)), (original, oct(0o644)))
+                self.assertEqual(path.read_bytes(), original)
+                if posix_modes(self, "restored settings mode"):
+                    self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o644))
 
     def test_rerun_after_a_sibling_settings_write_changes_nothing(self):
         names = (("claude", "settings.json"), ("codex", "hooks.json"))
@@ -424,7 +584,7 @@ class InstallerTests(unittest.TestCase):
         pruned = ("router/bin", "router/templates", "router", "hooks/router", "agents", "skills/dispatch")
         for keep_user_files in (False, True):
             with tempfile.TemporaryDirectory() as scratch:
-                self.env["HOME"] = scratch
+                self.env.update(home_env(scratch))
                 home = Path(scratch)
                 for host in ("claude", "codex"):
                     (home / ("." + host)).mkdir()
@@ -565,9 +725,9 @@ class InstallerTests(unittest.TestCase):
                 os.chmod(Path(base) / name, (Path(base) / name).stat().st_mode & ~0o222)
         self.addCleanup(lambda: [os.chmod(Path(b), 0o755) for b, _, _ in os.walk(locked)])
         env = dict(self.env)
-        run = lambda tree: subprocess.run([self.shell, str(tree / "install.sh"), "--host", "claude"],
-                                          env=env, text=True, capture_output=True,
-                                          stdin=subprocess.DEVNULL, timeout=40)
+        run = lambda tree, *flags: subprocess.run([self.shell, posix(tree / "install.sh"), "--host", "claude", *flags],
+                                                  env=env, text=True, capture_output=True,
+                                                  stdin=subprocess.DEVNULL, timeout=40)
         self.assertEqual(run(locked).returncode, 0)
         fresh = work / "fresh"
         shutil.copytree(ROOT, fresh, ignore=ignore)
@@ -580,10 +740,23 @@ class InstallerTests(unittest.TestCase):
         home = self.home / ".claude"
         installed = home / "hooks/router/codex_spawn_guard.py"
         self.assertTrue(installed.read_text().endswith("# changed\n"))
-        self.assertEqual(installed.stat().st_mode & 0o777, 0o644)
+        if posix_modes(self, "reinstalled hook mode"):
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o644)
         tool = home / "router/bin" / script.name
         self.assertTrue(tool.read_text().endswith("# changed\n"))
-        self.assertEqual(tool.stat().st_mode & 0o777, 0o755)
+        if posix_modes(self, "reinstalled tool mode"):
+            self.assertEqual(tool.stat().st_mode & 0o777, 0o755)
+        # Uninstall over files an older release left read-only (NTFS refuses to unlink or replace those).
+        for base, _, files in os.walk(home):
+            for name in files:
+                path = Path(base) / name
+                if not path.is_symlink():
+                    os.chmod(path, path.stat().st_mode & ~0o222)
+        result = run(fresh, "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(installed.exists())
+        self.assertFalse(tool.exists())
+        self.assertFalse((home / "router/install-manifest.json").exists())
 
     def test_backups_and_retired_state_kept_without_purge(self):
         for host, filename in (("claude", "settings.json"), ("codex", "hooks.json")):

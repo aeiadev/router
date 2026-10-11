@@ -27,6 +27,13 @@ SIZES = {"builder-in-place": 2141, "builder": 2101, "docs-writer": 1717, "judge"
 FIRST = "budget (estimate: bytes/4, no tokenizer)"
 
 
+def write_lf(path, text):
+    """UTF-8 with LF on every platform, as budget.py reads it (Path.write_text has no newline
+    argument before 3.10, and Windows defaults to cp1252 and CRLF)."""
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+
+
 def run(*args, env=None, script=BUDGET):
     return subprocess.run([sys.executable, str(script), *args], capture_output=True, text=True,
                           stdin=subprocess.DEVNULL, timeout=TIMEOUT, env=env)
@@ -41,12 +48,12 @@ def make_home(path, agents=None, skills=None, host="claude"):
     (path / "agents").mkdir(parents=True, exist_ok=True)
     for name, text in (agents or {}).items():
         if host == "codex":
-            (path / f"agents/{name}.toml").write_text(text)
+            write_lf((path / f"agents/{name}.toml"), text)
         else:
-            (path / f"agents/{name}.md").write_text(text)
+            write_lf((path / f"agents/{name}.md"), text)
     for name, text in (skills or {}).items():
         (path / f"skills/{name}").mkdir(parents=True, exist_ok=True)
-        (path / f"skills/{name}/SKILL.md").write_text(text)
+        write_lf((path / f"skills/{name}/SKILL.md"), text)
     return path
 
 
@@ -57,7 +64,7 @@ def make_checkout(path):
         shutil.copytree(ROOT / folder, path / folder)
     if IS_ROUTER:
         (path / "bin").mkdir()
-        (path / "bin/router").write_text("")
+        write_lf((path / "bin/router"), "")
     else:
         (path / "hooks/checkpoint").mkdir(parents=True)
     return path
@@ -108,7 +115,7 @@ class Counting(unittest.TestCase):
     def test_codex_layout(self):
         toml = '# Generated\nname = "ab"\ndescription = "cde"\ndeveloper_instructions = "name = \\"zz\\""\n'
         home = make_home(self.tmp / "h", {"ab": toml}, host="codex")
-        (home / "agents/stray.md").write_text(agent("stray", "not counted"))
+        write_lf((home / "agents/stray.md"), agent("stray", "not counted"))
         result = run("--home", str(home), "--host", "codex")
         self.assertEqual(result.stdout.splitlines()[1], "tree: 5 B always-on = 2 tokens (agents 5 B, skills 0 B)")
 
@@ -153,11 +160,11 @@ class Counting(unittest.TestCase):
         (copy / "agents").mkdir(parents=True)
         (copy / "scripts").mkdir()
         shutil.copy(BUDGET, copy / "scripts/budget.py")
-        (copy / "agents/SHARED.sha256").write_text(rows[18] + "\n")
+        write_lf((copy / "agents/SHARED.sha256"), rows[18] + "\n")
         check = lambda: subprocess.run(["sha256sum", "-c", "SHARED.sha256"], cwd=copy / "agents",
                                        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT)
         self.assertEqual(check().returncode, 0)
-        (copy / "scripts/budget.py").write_text(BUDGET.read_text() + "# drift\n")
+        write_lf((copy / "scripts/budget.py"), BUDGET.read_text() + "# drift\n")
         self.assertNotEqual(check().returncode, 0)
 
 
@@ -180,7 +187,7 @@ class Ceilings(unittest.TestCase):
         data = json.loads(run("--json", script=checkout / "scripts/budget.py").stdout)
         pad = CEILING * 4 - data["trees"][0]["bytes"] + 8
         path = checkout / "agents/worker.md"
-        path.write_text(pad_description(path.read_text(), pad))
+        write_lf(path, pad_description(path.read_text(), pad))
         result = self.check(checkout)
         self.assertEqual(result.returncode, 1)
         want = math.ceil((data["trees"][0]["bytes"] + pad) / 4)
@@ -189,7 +196,7 @@ class Ceilings(unittest.TestCase):
     def test_body_over_limit(self):
         checkout = make_checkout(self.tmp / "c")
         path = checkout / "agents/builder.md"
-        path.write_text(path.read_text() + "x" * (SIZES["builder"] * 6 // 100 + 1))
+        write_lf(path, path.read_text() + "x" * (SIZES["builder"] * 6 // 100 + 1))
         result = self.check(checkout)
         size = SIZES["builder"] + SIZES["builder"] * 6 // 100 + 1
         limit = SIZES["builder"] * 105 // 100
@@ -199,7 +206,7 @@ class Ceilings(unittest.TestCase):
     def test_codex_word_outside_tomls(self):
         checkout = make_checkout(self.tmp / "c")
         path = checkout / "agents/builder.md"
-        path.write_text(path.read_text().replace("Job", "Codex Job", 1))
+        write_lf(path, path.read_text().replace("Job", "Codex Job", 1))
         result = self.check(checkout)
         self.assertEqual(result.returncode, 1)
         self.assertRegex(result.stderr, r"\Abudget: agents/builder\.md mentions Codex outside the TOMLs\n\Z")
@@ -322,10 +329,10 @@ class StatusLine(unittest.TestCase):
                 shutil.copy(path, home / "agents" / path.name)
         shutil.copytree(ROOT / "skills", home / "skills", dirs_exist_ok=True)
         (home / "router").mkdir(parents=True, exist_ok=True)
-        (home / "router/install-manifest.json").write_text("{}")
+        write_lf((home / "router/install-manifest.json"), "{}")
         if harness:
             (home / "harness").mkdir()
-            (home / "harness/install-manifest.json").write_text("{}")
+            write_lf((home / "harness/install-manifest.json"), "{}")
         return home
 
     def status(self, root=ROOT, outer_timeout=TIMEOUT, **env):
@@ -355,7 +362,7 @@ class StatusLine(unittest.TestCase):
         self.install(self.claude)
         pad = 700 * 4
         path = self.claude / "agents/worker.md"
-        path.write_text(pad_description(path.read_text(), pad))
+        write_lf(path, pad_description(path.read_text(), pad))
         tree = tokens_of(self.claude)["trees"][0]
         result = self.status()
         line = (f"budget claude: ~{tree['tokens']} tokens always-on ({tree['bytes']} B names and "
@@ -407,7 +414,7 @@ class StatusLine(unittest.TestCase):
         for folder in ("bin", "hooks", "agents", "skills", "codex"):
             shutil.copytree(ROOT / folder, copy / folder)
         (copy / "scripts").mkdir()
-        (copy / "scripts/budget.py").write_text("raise RuntimeError('x')\n")
+        write_lf((copy / "scripts/budget.py"), "raise RuntimeError('x')\n")
         result = self.status(root=copy)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("budget: unavailable (scripts/budget.py failed)", result.stdout.splitlines())
@@ -437,7 +444,7 @@ class StatusLine(unittest.TestCase):
                 for folder in ("bin", "hooks", "agents", "skills", "codex"):
                     shutil.copytree(ROOT / folder, copy / folder)
                 (copy / "scripts").mkdir()
-                (copy / "scripts/budget.py").write_text(source)
+                write_lf((copy / "scripts/budget.py"), source)
                 result = self.status(root=copy, outer_timeout=2 if name == "sleep" else TIMEOUT,
                                      ROUTER_STATUS_BUDGET_TIMEOUT="1")
                 if name in ("import-exit-3", "import-exit-0", "hard-exit"):
@@ -456,7 +463,7 @@ class StatusLine(unittest.TestCase):
         script = copy / "scripts/budget.py"
         text = script.read_text()
         self.assertIn('CEILINGS = {"router": 650, "harness": 600, "together": 900}', text)
-        script.write_text(text.replace('CEILINGS = {"router": 650,', 'CEILINGS = {"router": 11,'))
+        write_lf(script, text.replace('CEILINGS = {"router": 650,', 'CEILINGS = {"router": 11,'))
         tree = json.loads(run("--home", str(copy), "--json", script=script).stdout)["trees"][0]
         result = self.status(root=copy)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -466,7 +473,7 @@ class StatusLine(unittest.TestCase):
 
     def test_status_ignores_caller_overlay(self):
         decoy = self.tmp / "decoy.json"
-        decoy.write_text('{"context":{"files_threshold":99}}')
+        write_lf(decoy, '{"context":{"files_threshold":99}}')
         from unittest.mock import patch
         with patch.dict(os.environ, {"ROUTER_LOCAL": str(decoy)}):
             result = self.status()

@@ -1,11 +1,12 @@
 # Contributing
 
-Run the checks in .github/workflows/ci.yml; none of them calls a model or the network.
-Python 3.10 or newer, standard library only.
+Run the whole suite with `python3 tests/run_all.py` (`python tests/run_all.py` in Git Bash on Windows); it runs every test file and lists every failure.
+No test calls a model or the network; CI also checks out the sibling repository and builds the old release trees.
+Python 3.9 or newer, standard library only.
 Keep a change small and add a test that fails without it.
 
-Run one test with `python3 tests/test_x.py`.
-The install tests need old release trees built from the published commits and tags; CI prepares them.
+Run one test file with `python3 tests/test_x.py`.
+The upgrade and together tests need ROUTER_V01, ROUTER_V02, HARNESS_V01 and HARNESS_V02 set to trees of the published 0.1 and 0.2 commits; the Old release trees step in .github/workflows/ci.yml shows how.
 README.md and CHANGELOG.md are edited during the release step.
 
 ## Releasing

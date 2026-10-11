@@ -32,7 +32,7 @@ class Env:
     """A fresh temp world: state dir, kill-switch path, routes copy, transcripts."""
 
     def __init__(self, mod=None):
-        self.tmp = Path(tempfile.mkdtemp(prefix="ctxguard-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="ctxguard~1-"))
         TMPS.append(self.tmp)
         self.state = self.tmp / "state"
         self.off = self.tmp / "guard.off"
@@ -154,8 +154,7 @@ def case_01_start_note():
     out = json.loads(proc.stdout)["hookSpecificOutput"]
     check(out["hookEventName"] == "SubagentStart", "event name")
     check("1500" in out["additionalContext"], "exec cap in text")
-    check(str(env.state / "reports") in out["additionalContext"] and "~" not in out["additionalContext"],
-          "reports dir expanded")
+    check(str(env.state / "reports") in out["additionalContext"], "reports dir expanded")
     proc = env.run(start_ev(env, "researcher"))
     text = ctx(proc)
     check("5000" in text and "reports" not in text, "research text has cap and no reports dir")

@@ -3,8 +3,10 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,9 +46,55 @@ def derived():
     assert pressure.limits(table(2), "remind")[0] <= 2 and pressure.limits(table(3), "remind")[0] == 2
 
 
+def hook_level():
+    """Run context_guard.py as installed (JSON on stdin): urgent chain, stale, wrong host."""
+    guard = ROOT / "hooks/router/context_guard.py"
+    T0 = 1_800_000_000_000
+    for kind in ("urgent", "stale", "wrong-host", "future"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = dict(os.environ, HOME=str(root / "home"), XDG_STATE_HOME=str(root / "xdg"),
+                       XDG_CONFIG_HOME=str(root / "config"), ROUTER_LOCAL="off",
+                       ROUTER_STATE=str(root / "state"), ROUTER_OFF_FILE=str(root / "off"),
+                       CLAUDE_HOME=str(root / "claude"), ROUTER_HOME=str(root / "rh"))
+            for name in ("ROUTER_OFF", "ROUTER_TEST_NOW_MS", "ROUTES_JSON"):
+                env.pop(name, None)
+            session = "hook-level-" + kind
+            transcript = root / "t.jsonl"
+            transcript.write_text("")
+            record = {"schema": 1, "host": "claude", "ts": time.time(), "used": 910,
+                      "window": 1000, "window_source": "statusline", "percent": 91, "level": "urgent"}
+            if kind == "stale":
+                record["ts"] -= 601
+            elif kind == "future":
+                record["ts"] += 61
+            elif kind == "wrong-host":
+                record["host"] = "codex"
+            path = root / "xdg/claude-harness/pressure" / (hashlib.sha256(session.encode()).hexdigest()[:16] + ".json")
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(record))
+            outputs = []
+            for step in (1, 2):
+                event = {"hook_event_name": "PreToolUse", "session_id": session, "transcript_path": str(transcript),
+                         "tool_name": "Bash", "tool_input": {"command": "cat a"}}
+                result = subprocess.run([sys.executable, str(guard)], input=json.dumps(event), text=True,
+                                        capture_output=True, timeout=20,
+                                        env=dict(env, ROUTER_TEST_NOW_MS=str(T0 + 2000 * step)))
+                assert result.returncode == 0, (kind, result.stderr)
+                outputs.append(result.stdout)
+            assert outputs[0] == "", (kind, outputs[0])
+            if kind == "urgent":
+                note = json.loads(outputs[1])["hookSpecificOutput"]["additionalContext"]
+                assert "2 consecutive" in note and "Context is at urgent (91%): delegate reads and sweeps." in note, note
+            else:
+                assert outputs[1] == "", (kind, outputs[1])
+    print("PASS hook-level urgent chain and stale or wrong-host pressure")
+
+
 def main():
     host_choice()
     derived()
+    hook_level()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         old = dict(os.environ)
@@ -103,12 +151,13 @@ def main():
             expect_warning("directory")
             path.rmdir()
             path.write_text(json.dumps(dict(record, ts=1000)))
-            path.chmod(0)
-            expect_warning("unreadable")
-            path.chmod(0o600)
-            path.parent.chmod(0)
-            expect_warning("unsearchable")
-            path.parent.chmod(0o700)
+            if os.name != "nt":  # NTFS ignores POSIX modes (stated limit)
+                path.chmod(0)
+                expect_warning("unreadable")
+                path.chmod(0o600)
+                path.parent.chmod(0)
+                expect_warning("unsearchable")
+                path.parent.chmod(0o700)
             routes = {"context": {"chain": {"first": 2}, "large_read_bytes": 10000,
                                   "pressure": {"remind": {"chain_first": 3, "large_read_bytes": 12000}}}}
             assert pressure.tightened(routes, {"level": "remind"}) == (2, 10000)

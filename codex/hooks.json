@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/codex_spawn_guard.py\""
+            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" sh \"${CODEX_HOME:-$HOME/.codex}/hooks/router/pyrun.sh\" router warn codex_spawn_guard.py"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/context_guard.py\""
+            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" sh \"${CODEX_HOME:-$HOME/.codex}/hooks/router/pyrun.sh\" router warn context_guard.py"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/session_note.py\""
+            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" sh \"${CODEX_HOME:-$HOME/.codex}/hooks/router/pyrun.sh\" router warn session_note.py"
           }
         ]
       }
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" python3 \"${CODEX_HOME:-$HOME/.codex}/hooks/router/prompt_hint.py\""
+            "command": "ROUTER_HOME=\"${CODEX_HOME:-$HOME/.codex}/router\" sh \"${CODEX_HOME:-$HOME/.codex}/hooks/router/pyrun.sh\" router warn prompt_hint.py"
           }
         ]
       }

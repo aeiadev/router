@@ -12,6 +12,11 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, IS_WINDOWS, posix  # noqa: E402
+# As installed: bin/router starts through pyrun.sh. Windows cannot run an extensionless script
+# directly (WinError 193), so there Git Bash runs it, as a user's shell would.
+CLI = [BASH, posix(ROOT / "bin/router")] if IS_WINDOWS else [str(ROOT / "bin/router")]
 
 
 class StatusTests(unittest.TestCase):
@@ -26,7 +31,7 @@ class StatusTests(unittest.TestCase):
                         CLAUDE_HOME=str(self.home / "claude"), CODEX_HOME=str(self.home / "codex"))
 
     def status(self, **env):
-        return subprocess.run([sys.executable, str(ROOT / "bin/router"), "status"],
+        return subprocess.run([*CLI, "status"],
                               env=dict(self.env, **env), stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=15)
 
@@ -66,6 +71,18 @@ class StatusTests(unittest.TestCase):
                 self.assertEqual(self.snapshot(), before)
                 self.assertFalse((self.state / "overlay-warned").exists())
         self.assert_overlay(self.status(ROUTER_LOCAL="off"), "overlay: off (ROUTER_LOCAL=off)", 0)
+
+    def test_status_writes_no_cache_under_an_apple_pycache_prefix(self):
+        # Apple's /usr/bin/python3 caches bytecode under ~/Library/Caches/com.apple.python; status and
+        # the budget check it starts must not write there.
+        env = {key: value for key, value in self.env.items() if key != "PYTHONDONTWRITEBYTECODE"}
+        env["PYTHONPYCACHEPREFIX"] = str(self.home / "Library/Caches/com.apple.python")
+        before = sorted(self.home.rglob("*"))
+        result = subprocess.run([*CLI, "status"], env=env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("budget checkout:", result.stdout)
+        self.assertEqual(sorted(self.home.rglob("*")), before)
 
     def test_two_keys_and_null_delete_lines(self):
         self.overlay.parent.mkdir(parents=True)

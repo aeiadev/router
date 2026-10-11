@@ -1,12 +1,13 @@
-"""Shared helpers for standalone routing hooks. Python 3.10+, standard library only.
+"""Shared helpers for standalone routing hooks. Python 3.9+, standard library only.
 
 Paths are resolved from ROUTER_HOME, CLAUDE_HOME, ROUTES_JSON, ROUTER_STATE,
 XDG_STATE_HOME, and ROUTER_OFF_FILE. ROUTER_OFF=1 disables all routing.
 Importing this module does not read or create state.
 """
+from __future__ import annotations
+
 import fnmatch
 import importlib.util
-import fcntl
 import hashlib
 import json
 import math
@@ -22,7 +23,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
-ROUTES_PATH = Path(os.environ.get("ROUTES_JSON") or Path(__file__).resolve().parent / "routes.json").expanduser()
+def _load_compat():
+    """compat.py beside the real common.py (an installed common.py may be a link or a copy)."""
+    loaded = sys.modules.get("router_compat")
+    if loaded is not None:
+        return loaded
+    spec = importlib.util.spec_from_file_location("router_compat", Path(__file__).resolve().with_name("compat.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules["router_compat"] = module
+    return module
+
+
+compat = _load_compat()
+ROUTES_PATH = compat.expanduser(os.environ.get("ROUTES_JSON") or Path(__file__).resolve().parent / "routes.json")
 
 
 class RoutesError(ValueError):
@@ -82,28 +96,28 @@ FIRST_WORD = re.compile(r"[^\s;&|<>()]+")
 
 def _env_path(name, *default_parts) -> Path:
     value = os.environ.get(name)
-    return Path(value).expanduser() if value else Path.home().joinpath(*default_parts)
+    return compat.expanduser(value) if value else compat.home().joinpath(*default_parts)
 
 
 def router_home() -> Path:
     """Configuration home, without creating directories."""
     value = os.environ.get("ROUTER_HOME")
-    return Path(value).expanduser() if value else claude_home() / "router"
+    return compat.expanduser(value) if value else claude_home() / "router"
 
 
 def state_path() -> Path:
     """State location, without creating directories."""
     value = os.environ.get("ROUTER_STATE")
     if value:
-        return Path(value).expanduser()
-    base = Path(os.environ.get("XDG_STATE_HOME") or "").expanduser()
-    return (base if base.is_absolute() else Path.home() / ".local/state") / "claude-router"
+        return compat.expanduser(value)
+    base = compat.expanduser(os.environ.get("XDG_STATE_HOME") or "")
+    return (base if compat.state_is_absolute(base) else compat.home() / ".local/state") / "claude-router"
 
 
 def off_file() -> Path:
     """The single persistent switch; presence disables every router hook."""
     value = os.environ.get("ROUTER_OFF_FILE")
-    return Path(value).expanduser() if value else state_path() / "OFF"
+    return compat.expanduser(value) if value else state_path() / "OFF"
 
 
 def auto_mode() -> str:
@@ -120,13 +134,7 @@ def set_auto_mode(mode: str) -> None:
         raise ValueError("invalid automatic routing mode")
     path = off_file().parent / "auto"
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_name(f".auto-{os.getpid()}")
-    try:
-        with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as stream:
-            stream.write(mode + "\n")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    compat.write_text(path, mode + "\n")
 
 
 def render_defaults(host, routes, mode, *, template=None) -> str:
@@ -268,7 +276,7 @@ def write_bytes_atomic(path: Path, data: bytes):
             stream.write(data)
         if path.exists():
             os.chmod(temporary, path.stat().st_mode & 0o777)
-        os.replace(temporary, path)
+        compat.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -360,7 +368,7 @@ def _state_file(sub, session_id, suffix):
 
 def _base_routes(path=None) -> dict:
     """Parse and validate the base table."""
-    source = Path(os.environ.get("ROUTES_JSON") or ROUTES_PATH).expanduser() if path is None else Path(path).expanduser()
+    source = compat.expanduser(os.environ.get("ROUTES_JSON") or ROUTES_PATH) if path is None else compat.expanduser(path)
     try:
         text = source.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -730,7 +738,7 @@ def session_start(data) -> float | None:
             return float(cache.read_text(encoding="ascii").strip())
         except (OSError, ValueError):
             pass
-    start = _first_timestamp(Path(transcript).expanduser())
+    start = _first_timestamp(compat.expanduser(transcript))
     if start is not None and cache is not None:
         try:
             cache.write_text(repr(start), encoding="ascii")
@@ -874,25 +882,18 @@ def rerun_denied(key, session_id, verdict, ttl_hours, now=None) -> str | None:
     path = _state_file("rerun", session_id, ".json")
     if path is None:
         return None
-    lock = path.with_suffix(".lock")
-    with open(lock, "a", encoding="utf-8") as stream:
-        os.chmod(lock, 0o600)
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        try:
-            seen = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-        except (OSError, ValueError):
-            seen = []
-        if key in seen:
-            return None
-        seen.append(key)
-        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".rerun-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
-                json.dump(seen, output)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+    try:
+        with compat.locked(path.with_suffix(".lock")):
+            try:
+                seen = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+            except (OSError, ValueError):
+                seen = []
+            if key in seen:
+                return None
+            seen.append(key)
+            compat.write_text(path, json.dumps(seen))
+    except compat.LockTimeout:
+        return None  # another hook holds the record: skip this update, allow the call
     when = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return f"already passed at {when}; change TASK or FILES to rerun"
 
@@ -994,9 +995,7 @@ def lane_label(value, routes) -> str | None:
         return None
     text = value.encode("utf-8", "replace").decode("utf-8")
     text = " ".join("".join(" " if unicodedata.category(char) in ("Cc", "Cf") else char for char in text).split())
-    home = " ".join(os.environ.get("HOME", "").split()).rstrip("/")
-    if home and (text == home or text.startswith(home + "/")):
-        text = "~" + text[len(home):]
+    text = compat.tilde(text, [" ".join(form.split()) for form in compat.home_forms()])
     return text[:LANE_LABEL_CHARS].rstrip() or None
 
 
@@ -1081,7 +1080,7 @@ def claude_home() -> Path:
 def plugins_root() -> Path:
     """Where Claude Code keeps plugins: CLAUDE_CODE_PLUGIN_CACHE_DIR, else claude_home()/plugins."""
     value = os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR")
-    return Path(value).expanduser() if value else claude_home() / "plugins"
+    return compat.expanduser(value) if value else claude_home() / "plugins"
 
 
 def enabled_plugins(settings) -> tuple[dict, str | None]:
@@ -1159,7 +1158,7 @@ def _project_dir(folder, home) -> Path:
     if value and Path(value).is_absolute() and os.path.isdir(value):
         return Path(value)
     current = folder
-    excluded = {os.path.realpath(home), os.path.realpath(Path.home() / ".claude")}
+    excluded = {os.path.realpath(home), os.path.realpath(compat.home() / ".claude")}
     for _ in range(PROJECT_SEARCH_LEVELS + 1):
         if (current / ".claude").is_dir() and os.path.realpath(current / ".claude") not in excluded:
             return current
@@ -1180,7 +1179,7 @@ def plugin_tier_agent(agent, cwd=None):
         return agent
     try:
         home = claude_home()
-        folder = Path(cwd) if isinstance(cwd, str) and cwd.startswith("/") else Path.cwd()
+        folder = Path(cwd) if compat.is_absolute(cwd) else Path.cwd()
         project = _project_dir(folder, home) / ".claude"
         for _ in range(PROJECT_SEARCH_LEVELS + 1):
             if (folder / ".claude" / "agents" / f"{agent}.md").is_file():
@@ -1293,7 +1292,7 @@ def agent_file(agent_type, cwd=None) -> str | None:
     name = agent_type.strip() if isinstance(agent_type, str) else ""
     if not name or name.startswith(".") or "/" in name or "\\" in name or "\0" in name:
         return None
-    if isinstance(cwd, str) and cwd.startswith("/"):
+    if compat.is_absolute(cwd):
         folder = Path(cwd)
         for _ in range(PROJECT_SEARCH_LEVELS + 1):
             candidate = folder / ".claude" / "agents" / f"{name}.md"
@@ -1323,7 +1322,7 @@ def session_model(transcript) -> str | None:
     if not isinstance(transcript, (str, Path)) or not str(transcript):
         return None
     try:
-        with Path(transcript).expanduser().open("rb") as handle:
+        with compat.expanduser(transcript).open("rb") as handle:
             handle.seek(0, 2)
             start = max(0, handle.tell() - TRANSCRIPT_TAIL_BYTES)
             handle.seek(start)
@@ -1699,7 +1698,7 @@ def decide_codex_spawn(tool_input, routes, modes, prior) -> dict:
     result["run_model"] = None  # selected by the editable role TOML, never guessed here
     canonical = canonical_role(role, routes)
     if canonical != role and isinstance(role, str) and effective_mode(modes.get("redirect")) != "off":
-        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+        home = compat.expanduser(os.environ.get("CODEX_HOME") or compat.home() / ".codex")
         if not (home / "agents" / (role + ".toml")).is_file():
             if effective_mode(modes.get("redirect")) == "enforce":
                 result.update(decision="block", rule="codex-alias", updated=None, run_type=canonical,

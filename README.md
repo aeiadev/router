@@ -78,11 +78,39 @@ From 0.1 or 0.2: those releases did not record which backup held your settings. 
 In Claude Code, `/plugin marketplace add aeiadev/router`, then `/plugin install router@router` and `/plugin install shared-roles@router`. The settings form is `{"enabledPlugins": {"router@router": true}}`. Plugin agents use names such as `router:builder-std`. A script install wins over the plugin: plugin hooks stand down when the install manifest exists. Codex has no plugin; it is not shipped there.
 <!-- shared:end -->
 
+## Platforms
+
+Requirements: Bash 3.2 or newer, Python 3.9 or newer, Git, and Claude Code or Codex CLI with subagents and command hooks; on native Windows, Git for Windows, with `install.sh` run from Git Bash. The Codex adapter uses the spawn hook format as of Codex CLI 0.156. Hook state uses standard-library SQLite and file locks.
+
+| Platform | Claude Code | Codex CLI | Requirements |
+| --- | --- | --- | --- |
+| Linux | Hooks start with `sh` | Hooks start with `sh` | Bash 3.2+, Python 3.9+, Git |
+| Stock macOS | Hooks start with `sh` | Hooks start with `sh` | System Bash 3.2, `/usr/bin/python3` 3.9, Git |
+| Native Windows | Hooks run in Git Bash | Hooks run in PowerShell through `command_windows` | Git for Windows; Python 3.9+ as `python3`, `python` or `py -3` |
+| WSL | As Linux, inside WSL | As Linux, inside WSL | As Linux; separate from a native Windows install |
+
+Every hook and the `router` command start through `hooks/router/pyrun.sh`, a POSIX `sh` launcher. It uses `ROUTER_PYTHON` when set, else the interpreter saved in Router's state folder, else the first of `python3`, `python` and `py -3` that is Python 3.9 or newer. Once Router's state folder exists, the first run that finds Python, even a `--dry-run`, saves its path there as `python`. With no Python, `install.sh` stops with `router install: missing requirement: python3`, and a hook prints this line on stderr and exits 1:
+
+```text
+router: no Python 3.9 or newer found (python3, python, py -3); install one or set ROUTER_PYTHON
+```
+
+### Native Windows limits
+
+- POSIX owner checks and permission bits such as 0600 and 0700 are not enforced on native Windows (NTFS keeps no POSIX modes), and the installer skips chmod there. Use Windows account and folder permissions to control access. File-mode statements elsewhere in this README apply to Linux, macOS and WSL.
+- Where the account cannot create symlinks (Windows without Developer Mode), the installer copies Router's internal links instead. The manifest records each copy by sha256, and upgrade and uninstall handle copies and links alike.
+- Codex runs hooks on native Windows in PowerShell through `command_windows`, with the Python that ran `install.sh`. If that Python is removed, the hook prints `router: Python missing; rerun install.sh` and exits 1; rerun `install.sh` after moving or replacing Python.
+- The Microsoft Store `python3` stub never counts as Python. With no real Python, Router prints the missing-Python line above instead of failing silently.
+- Use Windows-valid file names without control characters; names that Windows cannot create are outside native Windows support.
+- Keep installation, state and backup paths below the usual 260-character MAX_PATH limit, including the files created beneath them; longer paths are outside native Windows support.
+- Native Windows support starts with 0.3.1. Upgrade both Router and Harness to 0.3.1 before uninstalling either: a 0.2 uninstaller predates Windows support and can misread the current sibling's manifest keys.
+- Upgrading alongside Harness 0.2 on native Windows is not supported: Harness 0.2 claims no shared roles there, so Router refreshes them without the older-sibling notice.
+
+Native Windows and WSL keep separate installations; install in each one you use.
+
 ## Install
 
-Pair with [Harness](https://github.com/aeiadev/harness) for guarded commands and context restore; the shared Install both and Upgrade block above covers both tools.
-
-Requirements: Bash, Python 3.10 or newer, Git and Claude Code or Codex CLI with subagents and command hooks. The Codex adapter uses the spawn hook format as of Codex CLI 0.156. Use a Unix-like environment. The hook state uses standard-library SQLite and file locking. The helper checks and test commands use `timeout` from GNU coreutils.
+Pair with [Harness](https://github.com/aeiadev/harness) for guarded commands and context restore; the shared Install both and Upgrade block above covers both tools. Check [Platforms](#platforms) for requirements.
 
 From a local checkout:
 
@@ -377,6 +405,9 @@ Set overrides in the environment inherited by your host and by the CLI.
 | `ROUTER_OFF` | Unset | `1` disables routing immediately |
 | `ROUTER_LOCAL` | `${XDG_CONFIG_HOME:-$HOME/.config}/router/routes.local.json` | Local JSON Merge Patch overlay; `off` disables it |
 | `ROUTER_TEST_NOW_MS` | System clock | Test-only context-hook time, in milliseconds since the Unix epoch; leave unset for normal use |
+| `ROUTER_PYTHON` | Unset | Python for hooks and the `router` command, used before the saved interpreter |
+
+`ROUTER_STATE` or `XDG_STATE_HOME` written as `~user/...` needs `ROUTER_PYTHON` or a Python 3.9 or newer on PATH to resolve that account. On native Windows, a `~/` path whose rest starts with another separator or a drive, such as `~//tmp` or `~/C:state`, may need one too. If the saved interpreter is reachable only through such a path and no Python is found, the missing-Python line applies. Absolute paths, drive and UNC paths, and ordinary `~/` paths start from the saved interpreter.
 
 The hooks write `ledger.sqlite3` under the state directory with file mode 0600 and directory mode 0700. It stores no prompt, BAR, RETURN or finding text; verdict findings are counts. They do not log prompt bodies. Context limits are character counts configured in `context.caps`. Read-only agents trim their replies instead of writing reports. Internal hook errors allow the tool call and record an error when possible.
 
@@ -393,7 +424,9 @@ The hooks write `ledger.sqlite3` under the state directory with file mode 0600 a
 
 The local override path is `${XDG_CONFIG_HOME:-$HOME/.config}/router/routes.local.json`; set `ROUTER_LOCAL=PATH` to use another file. Apply [careful](examples/presets/careful.local.json), [medium](examples/presets/medium.local.json), or [small](examples/presets/small.local.json) by pointing `ROUTER_LOCAL` at it or copying it to the override path. `router config set` and `router promote` replace a symlinked overlay with a real 0600 file; the symlink target is untouched. An invalid override falls back to shipped routes for hooks and is reported by status, config check and doctor.
 
-`router.modes.brief`, `router.modes.rerun` and `router.modes.judge_reminder` control brief checks, a same-session rerun block and judge reminders. `router.lane_labels` controls saved lane labels. `router.ladder_ttl_hours` controls the ladder window. Hint settings `context.prompt_roles` and `context.hint_every` tune scored hints and their rate limit; `router auto` selects off, suggest, nudge or enforce. Harness context-pressure nudges tighten read and chain thresholds when a fresh matching signal exists. An event is treated as Codex pressure only when it carries `turn_id`; this detection is inferred and unverified against a live Codex session.
+`router.modes.brief`, `router.modes.rerun` and `router.modes.judge_reminder` control brief checks, a same-session rerun block and judge reminders. `router.lane_labels` controls saved lane labels. `router.ladder_ttl_hours` controls the ladder window. Hint settings `context.prompt_roles` and `context.hint_every` tune scored hints and their rate limit; `router auto` selects off, suggest, nudge or enforce. Harness context-pressure nudges tighten read and chain thresholds when a fresh matching signal exists.
+
+Router picks the pressure host from `harness_host` first, then an explicit `--host` argument, and only then treats an event that carries `turn_id` as Codex; live Codex visibility of pressure nudges remains unverified.
 
 ## Adapt the routes
 
@@ -425,6 +458,8 @@ The installer places these alongside `router` in `router/bin`:
 | `cite-check.py REPORT --root WORKTREE` | Check file and line citations in a report |
 | `close-lane.sh WORKTREE BRIEF` | Check changed paths against `FILES`, run `BAR`, then check scope again |
 
+On native Windows, `wait-until.sh` checks a `pid` without signalling it, reads the process table itself for `no-proc`, and maps a pid from Git Bash `$!` to its Windows pid.
+
 `close-lane.sh` runs the BAR from the worktree root. Give it a brief you trust: the BAR is a shell command. In `FILES`, `*` and `?` match within one path segment, `**` spans segments, and a trailing `/` allows a subtree. Quote patterns containing spaces.
 
 Use `CLOSE_LANE_BASE` to choose the Git base for committed changes; the default is local `main`, then `master`, then `HEAD`. The check freezes the merge base before running the BAR. With the `HEAD` fallback, only working changes are checked, so specify a base when reviewing commits on another branch. `CLOSE_LANE_BAR_TIMEOUT` limits the check, defaulting to 900 seconds. Neither a scope check nor a passing BAR replaces the fresh judge.
@@ -433,12 +468,14 @@ The verdict record is the ledger. Use `router lanes` and `router report` to insp
 
 ## Development
 
-Tests need no network, private configuration or model calls:
+Tests need no network, private configuration or model calls. `tests/run_all.py` runs every test file with a per-file timeout and lists every failure; in Git Bash on Windows, run it with `python`:
 
 <!-- docs:skip -->
 ```bash
-timeout 900 bash -c 'for t in tests/test_*.py; do python3 "$t" || exit 1; done && bash tests/fresh-user.sh && bash tests/fresh-user-codex.sh'
+python3 tests/run_all.py
 ```
+
+Native Windows test runs skip POSIX owner and mode assertions and chmod-based unreadable-file fixtures; checks of file contents, copy lifecycles and injected errors still run. Where the account cannot create symlinks, symlink assertions are skipped and the copy fallback stays tested. FIFO fixtures need `os.mkfifo`, which Windows Python lacks. The system-Bash release-notes check runs only when `/bin/bash` is older than 4. The Windows simulation self-check runs only under `PYTHONPATH=tests/win_sim`. Tests that start the 0.1 or 0.2 installers need Python 3.10 or newer (a stock Mac has 3.9) and skip only those cases when none is on PATH; on native Windows, the cases where an old 0.2 uninstaller runs first are skipped.
 
 Both fresh-user tests install into temporary homes and exercise the installed hooks and shared kill switch. The Codex test sets temporary HOME and CODEX_HOME; it never starts Codex or calls a model. The package includes a Gitleaks configuration that extends its default secret rules.
 To check installation alongside Harness in both orders, run `HARNESS_DIR=/path/to/harness bash tests/together.sh`.

@@ -16,6 +16,8 @@ def overlay_path(environ=None):
     if configured == "off":
         return None
     if configured:
+        if configured == "~" or configured.startswith(("~/", "~\\")):  # this env's HOME, as on line 22
+            return Path(env.get("HOME") or Path.home()) / configured[2:]
         return Path(configured).expanduser()
     base = Path(env.get("XDG_CONFIG_HOME") or "").expanduser()
     if not base.is_absolute():

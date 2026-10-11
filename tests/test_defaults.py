@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, posix  # noqa: E402
 sys.path.insert(0, str(ROOT / "hooks/router"))
 import common
 
@@ -226,7 +228,7 @@ class LifecycleTests(unittest.TestCase):
             self.paths[host] = folder / filename
 
     def install(self, *args, ok=True):
-        result = subprocess.run(["bash", str(ROOT / "install.sh"), "--host", "both", *args],
+        result = subprocess.run([BASH, posix(ROOT / "install.sh"), "--host", "both", *args],
                                 env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode == 0, ok, result.stderr)
         return result
@@ -316,7 +318,7 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(manifest.read_bytes(), before)
                 notices = [line for line in result.stdout.splitlines() if "Defaults were not updated" in line]
                 self.assertEqual(len(notices), 1)
-                self.assertIn(str(path), notices[0])
+                self.assertIn(str(path.resolve()), notices[0])  # the installed CLI prints its resolved home
                 self.assertIn("install.sh --with-defaults", notices[0])
                 self.assertEqual(result.stdout.splitlines()[-1], "enforce")
                 self.install("--with-defaults")
@@ -334,7 +336,7 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(manifest.read_bytes(), before)
                 notices = [line for line in result.stdout.splitlines() if "Defaults were not updated" in line]
                 self.assertEqual(len(notices), 1)
-                self.assertIn(str(path), notices[0])
+                self.assertIn(str(path.resolve()), notices[0])  # the installed CLI prints its resolved home
                 self.assertIn("install.sh --with-defaults", notices[0])
                 self.assertEqual(result.stdout.splitlines()[-1], "enforce")
                 self.install("--with-defaults")

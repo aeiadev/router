@@ -5,6 +5,7 @@ source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 fresh_home="$(mktemp -d)"
 trap 'rm -rf -- "$fresh_home"' EXIT
 export HOME="$fresh_home"
+if [[ -n ${MSYSTEM:-} ]]; then export USERPROFILE="$(cygpath -w "$fresh_home")"; fi
 unset CLAUDE_HOME CODEX_HOME ROUTES_JSON
 while IFS= read -r variable; do
   unset "$variable"
@@ -15,7 +16,9 @@ export XDG_CACHE_HOME="$HOME/.cache"
 export PYTHONDONTWRITEBYTECODE=1
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
-python3 - "$source_root" <<'PY'
+# pyrun.sh picks the interpreter the hooks use: python3, python or py -3, never the Store stub.
+python=$("$BASH" "$source_root/hooks/router/pyrun.sh" --find router)
+"$python" - "$source_root" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -24,6 +27,8 @@ import subprocess
 import sys
 
 root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "tests"))
+from _platform import BASH, POSIX_MODES, posix, python_shim  # noqa: E402
 home = Path.home()
 claude = home / ".claude"
 installer = root / "install.sh"
@@ -43,11 +48,11 @@ def run(command, *, environment=None, input_text=None, expected=0):
 
 
 def install(*options, environment=None, expected=0):
-    return run(["bash", str(installer), "--host", "claude", *options], environment=environment, expected=expected)
+    return run([BASH, posix(installer), "--host", "claude", *options], environment=environment, expected=expected)
 
 
 def tree_snapshot(path):
-    return {str(item.relative_to(path)): item.read_bytes()
+    return {item.relative_to(path).as_posix(): item.read_bytes()
             for item in path.rglob("*") if item.is_file()}
 
 
@@ -91,15 +96,15 @@ def assert_routing(folder, environment):
                 check("known `route: up <code>`" in result.stderr,
                       "installed guard bypassed the top-tier model check")
     cli = folder / "router/bin/router"
-    status = run([str(cli), "status"], environment=environment)
+    status = run([BASH, posix(cli), "status"], environment=environment)
     check(status.stdout.startswith("on\n"), "installed router status did not report on")
-    run([str(cli), "off"], environment=environment)
+    run([BASH, posix(cli), "off"], environment=environment)
     disabled = run([sys.executable, str(guard)], environment=environment, input_text=json.dumps(event))
     check(disabled.stdout == "" and disabled.stderr == "", "router off still emitted a hook override")
     # Empty hook output is the host's contract for leaving the original event unchanged.
     unchanged = event["tool_input"] if not disabled.stdout else json.loads(disabled.stdout)["hookSpecificOutput"]["updatedInput"]
     check(unchanged == event["tool_input"], "router off changed the original input")
-    run([str(cli), "on"], environment=environment)
+    run([BASH, posix(cli), "on"], environment=environment)
 
 
 try:
@@ -194,7 +199,7 @@ try:
     command = hooks_for(custom_settings, "spawn_guard.py")[0][1]["hooks"][0]["command"]
     event = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input":
              {"subagent_type": "builder", "prompt": "TASK custom path\nFILES README.md\nBAR true\nRETURN five lines"}}
-    configured = run(["bash", "-c", command], environment=dict(os.environ), input_text=json.dumps(event))
+    configured = run([BASH, "-c", command], environment=dict(os.environ), input_text=json.dumps(event))
     check(json.loads(configured.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet",
           "custom hook command failed with spaces or a quote in CLAUDE_HOME")
     install("--uninstall", environment=custom_env)
@@ -207,7 +212,11 @@ try:
     purge_env = dict(os.environ, CLAUDE_HOME=str(purge_home), ROUTER_STATE=str(home / "purge-state"))
     install(environment=purge_env)
     backups = list(purge_home.glob("settings.json.router-backup-*"))
-    check(len(backups) == 1 and backups[0].stat().st_mode & 0o777 == 0o600, "install backup missing or not 0600")
+    check(len(backups) == 1, "install backup missing")
+    if POSIX_MODES:
+        check(backups[0].stat().st_mode & 0o777 == 0o600, "install backup not 0600")
+    else:
+        print("SKIP backup mode check: native Windows has no POSIX file modes")
     kept = {name: data for name, data in tree_snapshot(purge_home).items() if ".router-backup-" not in name}
     purged = install("--purge", environment=purge_env)
     check(f"Removed backup: {backups[0]}" in purged.stdout, "--purge did not list the backup")
@@ -219,13 +228,17 @@ try:
 
     missing_path = home / "requirements"
     missing_path.mkdir()
-    requirement_env = dict(os.environ, PATH=str(missing_path))
-    shell = shutil.which("bash")
-    absent_python = run([shell, str(installer)], environment=requirement_env, expected=1)
+    # A fresh state folder too: pyrun.sh would otherwise reuse the interpreter the hooks cached.
+    requirement_env = dict(os.environ, PATH=str(missing_path), XDG_STATE_HOME=str(missing_path / "state"))
+    shell = BASH
+    absent_python = run([shell, posix(installer)], environment=requirement_env, expected=1)
     check("missing requirement: python3" in absent_python.stderr, "missing python3 error is unclear")
-    (missing_path / "python3").symlink_to(sys.executable)
-    absent_git = run([shell, str(installer)], environment=requirement_env, expected=1)
-    check("missing requirement: git" in absent_git.stderr, "missing git error is unclear")
+    python_shim(missing_path)
+    # Git Bash restores its own directories while starting; restrict PATH after startup.
+    absent_git = run([shell, "-c", 'PATH=$1; export PATH; source "$2"', posix(installer),
+                      posix(missing_path), posix(installer)], environment=requirement_env, expected=1)
+    check(absent_git.stderr.strip() == "router install: missing requirement: git",
+          f"missing git error is unclear: {absent_git.stderr}")
 except (AssertionError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
     sys.exit(f"fresh-user: FAIL: {exc}")
 

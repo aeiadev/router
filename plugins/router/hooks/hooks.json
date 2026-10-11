@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/spawn_guard.py\""
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh\" router warn spawn_guard.py"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/context_guard.py\""
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh\" router warn context_guard.py"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/context_guard.py\""
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh\" router warn context_guard.py"
           }
         ]
       }
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/context_guard.py\""
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh\" router warn context_guard.py"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/session_note.py\""
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh\" router warn session_note.py"
           }
         ]
       }
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/judge_reminder.py\""
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh\" router warn judge_reminder.py"
           }
         ]
       }
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/router/prompt_hint.py\""
+            "command": "[ -e \"${CLAUDE_HOME:-$HOME/.claude}/router/install-manifest.json\" ] || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh\" router warn prompt_hint.py"
           }
         ]
       }

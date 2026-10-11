@@ -15,9 +15,53 @@ import unittest
 from unittest import mock
 
 sys.dont_write_bytecode = True
+from _platform import BASH, IS_WINDOWS, posix
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from _platform import BASH, IS_WINDOWS, posix, home_env  # noqa: E402
 sys.path.insert(0, str(ROOT / "hooks/router"))
 CHECK_ROW = re.compile(r"\[(?:ok|warn|FAIL)\] [a-z ]+: .+|  (?:edited|missing): .+|  .+ \(retired by an earlier release\)")
+
+
+import _released_python
+
+RELEASED_PYTHON = []  # one shim folder whose python3 is verified as 3.10 or newer
+
+
+def released_env(env):
+    return _released_python.released_env(env, RELEASED_PYTHON)
+
+
+class ManifestPathTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / "install-manifest.json"
+
+    def test_router_manifest_accepts_backslash_file_keys_without_writing(self):
+        import cmd_doctor
+        value = {"files": {"agents\\builder.md": {"sha256": "0" * 64}}}
+        self.path.write_text(json.dumps(value), encoding="utf-8")
+        before = self.path.read_bytes()
+        found, error = cmd_doctor._manifest(self.path)
+        self.assertIsNone(error)
+        self.assertEqual(found["files"], {"agents/builder.md": {"sha256": "0" * 64}})
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_harness_manifest_accepts_backslash_file_keys_without_writing(self):
+        import cmd_doctor
+        value = {"version": 1, "files": {"agents\\builder.md": "0" * 64}, "hooks": {}}
+        self.path.write_text(json.dumps(value), encoding="utf-8")
+        before = self.path.read_bytes()
+        found = cmd_doctor._harness_manifest(self.path)
+        self.assertEqual(found["files"], {"agents/builder.md": "0" * 64})
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_harness_manifest_rejects_backslash_parent_segments(self):
+        import cmd_doctor
+        value = {"version": 1, "files": {"agents\\..\\outside": "0" * 64}, "hooks": {}}
+        self.path.write_text(json.dumps(value), encoding="utf-8")
+        self.assertIsNone(cmd_doctor._harness_manifest(self.path))
 
 
 class DoctorTests(unittest.TestCase):
@@ -31,18 +75,20 @@ class DoctorTests(unittest.TestCase):
         self.config = self.base / "config"
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("ROUTER_", "CLAUDE_", "CODEX_", "XDG_"))}
-        self.env.update(HOME=str(self.base), CLAUDE_HOME=str(self.claude), CODEX_HOME=str(self.codex),
+        self.env.update(**home_env(self.base), CLAUDE_HOME=str(self.claude), CODEX_HOME=str(self.codex),
                         XDG_CONFIG_HOME=str(self.config), XDG_STATE_HOME=str(self.base / "state"),
                         ROUTER_LOCAL="off")
 
     def run_doctor(self, *args, env=None):
-        return subprocess.run([sys.executable, str(ROOT / "bin/router"), "doctor", *args],
+        # -B: the test's own interpreter; Apple python3 would cache the standard library under HOME.
+        return subprocess.run([sys.executable, "-B", str(ROOT / "bin/router"), "doctor", *args],
                               env=env or self.env, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=30)
 
     def install(self, host="claude", tree=ROOT):
-        result = subprocess.run(["bash", str(tree / "install.sh"), "--host", host],
-                                env=self.env, capture_output=True, text=True,
+        result = subprocess.run([BASH, posix(tree / "install.sh"), "--host", host],
+                                env=self.env if tree == ROOT else released_env(self.env),
+                                capture_output=True, text=True,
                                 stdin=subprocess.DEVNULL, timeout=50)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -86,8 +132,9 @@ class DoctorTests(unittest.TestCase):
         return [name for name in manifest["files"] if name.startswith(prefix)]
 
     def locked(self, path):
-        if os.geteuid() == 0:
-            self.skipTest("running as root: chmod 000 does not deny access")
+        if os.name == "nt" or os.geteuid() == 0:
+            print(f"SKIP {self.id()}: root and NTFS read mode 000 files", file=sys.stderr, flush=True)
+            self.skipTest("root and NTFS read mode 000 files")
         path.chmod(0)
         self.addCleanup(path.chmod, 0o755)
 
@@ -115,7 +162,8 @@ class DoctorTests(unittest.TestCase):
         rows = self.lines(self.run_doctor())
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(rows[0], f"Router doctor (claude): {self.claude}")
-        self.assertIn("[ok] version: installed 0.3.0, checkout 0.3.0 (current)", rows)
+        version = (ROOT / 'VERSION').read_text().strip()
+        self.assertIn(f"[ok] version: installed {version}, checkout {version} (current)", rows)
         self.assertIn("[ok] skew: none", rows)
         self.assertIn("[ok] overlay: off (ROUTER_LOCAL=off)", rows)
         self.assertIn("[ok] spawn: dry run allowed a sweeper brief", rows)
@@ -133,16 +181,67 @@ class DoctorTests(unittest.TestCase):
         row = json.loads(budget.stdout)["trees"][0]
         self.assertIn(f"[ok] budget: {row['label']} {row['tokens']} tokens always-on (estimate, ceiling 650)", rows)
 
+    def test_path_lookup_finds_the_extensionless_router_on_windows(self):
+        # Windows Python's shutil.which() skips the extensionless router that Git Bash runs; there the
+        # first PATH folder that holds a file named router decides, as in the shell.
+        import cmd_doctor
+        installed, earlier, empty = (self.base / name for name in ("installed", "earlier", "empty"))
+        for folder in (installed, earlier, empty):
+            folder.mkdir()
+        command = installed / "router"
+        for path in (command, earlier / "router"):
+            path.write_text("#!/bin/sh\n")
+            os.chmod(path, 0o644)  # no execute bit: what shutil.which() misses, as on Windows
+        cases = (([installed], True), ([empty, installed], True), ([earlier, installed], False),
+                 ([empty], False), ([], False))
+        for folders, wanted in cases:
+            with self.subTest(folders=folders), mock.patch.dict(os.environ, PATH=os.pathsep.join(map(str, folders))):
+                self.assertIs(cmd_doctor._router_on_path(command, windows=True), wanted)
+        if IS_WINDOWS:
+            return
+        for path in (command, earlier / "router"):
+            os.chmod(path, 0o755)
+        for folders, wanted in cases:  # elsewhere shutil.which() keeps the executable lookup
+            with self.subTest(folders=folders), mock.patch.dict(os.environ, PATH=os.pathsep.join(map(str, folders))):
+                self.assertIs(cmd_doctor._router_on_path(command, windows=False), wanted)
+
     def test_missing_hook_fails(self):
         self.install()
         (self.claude / "hooks/router/spawn_guard.py").unlink()
         rows = self.lines(self.run_doctor())
         self.assertIn("[FAIL] hooks: spawn_guard.py is registered but missing", rows)
 
+    def test_hook_commands_in_the_launcher_and_the_old_form_are_found(self):
+        import cmd_doctor
+        commands = ('sh "$HOME/.claude/hooks/router/pyrun.sh" router warn spawn_guard.py',
+                    "CLAUDE_HOME='/x y' sh '/x y/hooks/router/pyrun.sh' router warn context_guard.py",
+                    'python3 "$HOME/.claude/hooks/router/judge_reminder.py"',  # 0.3.0 and earlier
+                    '[ -e m ] || sh "${CLAUDE_PLUGIN_ROOT}/hooks/router/pyrun.sh" router warn prompt_hint.py',
+                    'sh "$HOME/.claude/harness/hooks/pyrun.sh" harness warn helpers/x.py')
+        value = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": item} for item in commands]}]}}
+        self.assertEqual(cmd_doctor._commands(value),
+                         ["spawn_guard.py", "context_guard.py", "judge_reminder.py", "prompt_hint.py"])
+
+    def test_old_form_settings_still_diagnose(self):
+        self.install()
+        settings = self.claude / "settings.json"
+        config = json.loads(settings.read_text())
+        for blocks in config["hooks"].values():
+            for block in blocks:
+                for hook in block["hooks"]:
+                    self.assertIn("pyrun.sh", hook["command"])
+                    script = hook["command"].split()[-1]
+                    hook["command"] = f'python3 "{self.claude}/hooks/router/{script}"'
+        settings.write_text(json.dumps(config))
+        (self.claude / "hooks/router/judge_reminder.py").unlink()
+        rows = self.lines(self.run_doctor())
+        self.assertIn("[FAIL] hooks: judge_reminder.py is registered but missing", rows)
+        self.assertFalse([row for row in rows if "none registered" in row], rows)
+
     def test_retired_files_and_old_version(self):
         self.install(tree=self.old_tree("ROUTER_V02"))
         rows = self.lines(self.run_doctor())
-        self.assertIn("[warn] version: installed 0.2.0 or earlier, checkout 0.3.0", rows)
+        self.assertIn(f"[warn] version: installed 0.2.0 or earlier, checkout {(ROOT / 'VERSION').read_text().strip()}", rows)
         self.install()
         retired = self.claude / "agents/Explore.md"
         retired.write_text("retired")
@@ -189,6 +288,36 @@ class DoctorTests(unittest.TestCase):
             shutil.rmtree(checkout)
             self.expect(self.lines(run()), "[warn] skew: unknown (checkout not found)")
 
+    def test_unreadable_shared_role_makes_skew_unknown(self):
+        # The checkout copy of a shared role the sibling claims cannot be read: skew is unknown, a warning.
+        real_read = Path.read_bytes
+        for host, home, name, source in (("claude", self.claude, "agents/sweeper.md", ROOT / "agents/sweeper.md"),
+                                         ("codex", self.codex, "agents/sweeper.toml",
+                                          ROOT / "codex/agents/sweeper.toml")):
+            with self.subTest(host=host):
+                self.install(host)
+                sibling = home / "harness/install-manifest.json"
+                sibling.parent.mkdir(exist_ok=True)
+                sibling.write_text(json.dumps({"version": 1, "package": "0.3.1",
+                                               "files": {name: "0" * 64}, "hooks": {}}))
+                self.assertEqual((home / name).read_bytes(), source.read_bytes())
+                skew = lambda rows: [row for row in rows if row.split(" ", 1)[-1].startswith("skew:")]
+                rows = self.inproc("--host", host)
+                self.assertEqual(skew(rows), ["[ok] skew: none"])
+                self.assertFalse([row for row in rows if row.startswith("[FAIL]")], rows)
+                faults = []
+
+                def read_bytes(path):
+                    if path == source:
+                        faults.append(path)
+                        raise PermissionError(13, "Permission denied", str(path))
+                    return real_read(path)
+
+                rows = self.inproc("--host", host, patches=((Path, "read_bytes", read_bytes),))
+                self.assertEqual(faults, [source])
+                self.assertEqual(skew(rows), ["[warn] skew: unknown (shared role not readable)"])
+                self.assertFalse([row for row in rows if row.startswith("[FAIL]")], rows)
+
     def test_edited_missing_and_last_write(self):
         self.install()
         manifest = json.loads((self.claude / "router/install-manifest.json").read_text())
@@ -216,7 +345,7 @@ class DoctorTests(unittest.TestCase):
         manifest.unlink()
         manifest.mkdir()
         rows = self.lines(self.run_doctor())
-        self.assertIn("[warn] version: installed unknown, checkout 0.3.0", rows)
+        self.assertIn(f"[warn] version: installed unknown, checkout {(ROOT / 'VERSION').read_text().strip()}", rows)
 
     def test_overlay_bad_shapes_and_no_marker(self):
         self.install()
@@ -302,7 +431,6 @@ class DoctorTests(unittest.TestCase):
             (settings, "unreadable"): ["[FAIL] hooks: settings.json is not readable"],
             (manifest, "directory"): bad_manifest, (manifest, "deep"): bad_manifest,
             (manifest, "binary"): bad_manifest, (manifest, "unreadable"): bad_manifest,
-            (errors, "directory"): [f"[warn] errors: unavailable (errors.jsonl is not readable: {errors}, IsADirectoryError)"],
             (errors, "deep"): ["[ok] errors: none"], (errors, "binary"): ["[ok] errors: none"],
             (errors, "unreadable"): [unreadable_errors],
         }
@@ -311,7 +439,9 @@ class DoctorTests(unittest.TestCase):
             original = path.read_bytes() if path.is_file() else None
             try:
                 for kind in ("directory", "deep", "binary", "unreadable"):
-                    if kind == "unreadable" and os.geteuid() == 0:
+                    if kind == "unreadable" and (os.name == "nt" or os.geteuid() == 0):
+                        reason = "Windows has no POSIX file modes" if IS_WINDOWS else "root reads mode 000 files"
+                        print(f"SKIP {self.id()} unreadable {path.name}: {reason}", file=sys.stderr, flush=True)
                         continue
                     if path.is_dir():
                         path.rmdir()
@@ -320,6 +450,12 @@ class DoctorTests(unittest.TestCase):
                         path.unlink()
                     if kind == "directory":
                         path.mkdir()
+                        if path == errors:
+                            with self.assertRaises(OSError) as caught:
+                                with path.open("rb"):
+                                    pass
+                            reason = type(caught.exception).__name__
+                            expected[(path, kind)] = [f"[warn] errors: unavailable (errors.jsonl is not readable: {path}, {reason})"]
                     elif kind == "deep":
                         path.write_bytes(b"[" * 100000 + b"]" * 100000)
                     elif kind == "binary":
@@ -354,7 +490,7 @@ class DoctorTests(unittest.TestCase):
         (copy / "hooks/router").mkdir(parents=True)
         (copy / "bin").mkdir()
         shutil.copy2(ROOT / "bin/router", copy / "bin/router")
-        for name in ("cmd_doctor.py", "common.py", "overlay.py", "routes.json"):
+        for name in ("cmd_doctor.py", "common.py", "compat.py", "overlay.py", "routes.json"):
             shutil.copy2(ROOT / "hooks/router" / name, copy / "hooks/router" / name)
         (copy / "VERSION").write_text("0.3.0\n")
         result = subprocess.run([sys.executable, str(copy / "bin/router"), "doctor"], env=self.env,
@@ -371,7 +507,7 @@ class DoctorTests(unittest.TestCase):
         (copy / "hooks/router").mkdir(parents=True)
         (copy / "scripts").mkdir()
         shutil.copy2(ROOT / "hooks/router/cmd_doctor.py", copy / "hooks/router/cmd_doctor.py")
-        for name in ("common.py", "overlay.py", "routes.json"):
+        for name in ("common.py", "compat.py", "overlay.py", "routes.json"):
             shutil.copy2(ROOT / "hooks/router" / name, copy / "hooks/router" / name)
         (copy / "VERSION").write_text("0.3.0\n")
         (copy / "bin").mkdir()
@@ -400,7 +536,7 @@ class DoctorTests(unittest.TestCase):
     def test_unreadable_hooks_directory(self):
         self.install()
         settings = (self.claude / "settings.json").read_text()
-        scripts = re.findall(r"/hooks/router/([A-Za-z_][A-Za-z_0-9]*\.py)", settings)
+        scripts = re.findall(r"pyrun\.sh\\?\"? router warn ([A-Za-z_][A-Za-z_0-9]*\.py)", settings)
         folder = self.claude / "hooks/router"
         self.locked(folder)
         for mode in (0, 0o444):  # Neither lets a hook file be opened: one line names the directory.
@@ -565,8 +701,14 @@ class DoctorTests(unittest.TestCase):
     def test_python_too_old(self):
         self.install()
         import cmd_doctor
-        rows = self.inproc(patches=((cmd_doctor, "python_version", lambda: (3, 9, 0)),))
-        self.expect(rows, f"[FAIL] python: 3.9.0 at {sys.executable}, need 3.10 or newer")
+        rows = self.inproc(patches=((cmd_doctor, "python_version", lambda: (3, 8, 18)),))
+        self.expect(rows, f"[FAIL] python: 3.8.18 at {sys.executable}, need 3.9 or newer")
+
+    def test_python_floor_is_39(self):
+        self.install()
+        import cmd_doctor
+        rows = self.inproc(patches=((cmd_doctor, "python_version", lambda: (3, 9, 6)),))
+        self.expect(rows, f"[ok] python: 3.9.6 ({sys.executable})")
 
     def test_path_warning(self):
         self.install()
@@ -620,7 +762,7 @@ class DoctorTests(unittest.TestCase):
                                 env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertRegex(result.stderr, rf"\Arouter: cannot load the router hooks from {re.escape(str(hooks))}: (?:PermissionError|ModuleNotFoundError|ImportError)\n\Z")
+        self.assertRegex(result.stderr, rf"\Arouter: cannot load the router hooks from {re.escape(str(hooks.resolve()))}: (?:PermissionError|ModuleNotFoundError|ImportError)\n\Z")
 
     def test_installed_missing_common_reports_one_line(self):
         self.install()
@@ -630,7 +772,7 @@ class DoctorTests(unittest.TestCase):
                                 env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertRegex(result.stderr, rf"\Arouter: cannot load the router hooks from {re.escape(str(hooks))}: (?:ModuleNotFoundError|ImportError)\n\Z")
+        self.assertRegex(result.stderr, rf"\Arouter: cannot load the router hooks from {re.escape(str(hooks.resolve()))}: (?:ModuleNotFoundError|ImportError)\n\Z")
 
     def test_spawn_dry_run_exception(self):
         self.install()
@@ -707,11 +849,28 @@ class DoctorTests(unittest.TestCase):
         self.install()
         env = {key: value for key, value in self.env.items() if key != "PYTHONDONTWRITEBYTECODE"}
         before = {path for path in self.base.rglob("*")}
-        result = subprocess.run([sys.executable, str(self.claude / "router/bin/router"), "doctor"], env=env,
+        entry = self.claude / "router/bin/router"
+        command = [BASH, posix(entry), "doctor"] if IS_WINDOWS else [str(entry), "doctor"]
+        result = subprocess.run(command, env=env,  # as installed
                                 capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
         self.lines(result)
         new = sorted(path for path in self.base.rglob("*") if path not in before)
         self.assertEqual(new, [])
+
+    def test_installed_run_writes_no_cache_under_an_apple_pycache_prefix(self):
+        # Apple's /usr/bin/python3 sets sys.pycache_prefix to ~/Library/Caches/com.apple.python, so any
+        # Python that doctor starts without -B writes standard-library bytecode below HOME.
+        self.install()
+        env = {key: value for key, value in self.env.items() if key != "PYTHONDONTWRITEBYTECODE"}
+        env["PYTHONPYCACHEPREFIX"] = str(self.base / "Library/Caches/com.apple.python")
+        before = {path for path in self.base.rglob("*")}
+        entry = self.claude / "router/bin/router"
+        command = [BASH, posix(entry), "doctor"] if IS_WINDOWS else [str(entry), "doctor"]
+        result = subprocess.run(command, env=env,
+                                capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+        self.lines(result)
+        self.assertTrue(any(re.match(r"\[(?:ok|warn|FAIL)\] budget: ", row) for row in result.stdout.splitlines()))
+        self.assertEqual(sorted(path for path in self.base.rglob("*") if path not in before), [])
 
 
 if __name__ == "__main__":

@@ -150,7 +150,7 @@ class SubagentStopLinkTests(LaneCase):
                          [("judged", returned_at)])
         self.assertEqual([(v["verdict"], v["findings"], v["round"]) for v in self.verdicts()],
                          [("SEND_BACK", 2, 1)])
-        self.assertEqual(list(self.state.glob("ledger.spool*")), [])
+        self.assertEqual([path.name for path in self.state.glob("ledger.spool*")], ["ledger.spool.lock"])
 
     def test_builder_return_marks_lane_returned(self):
         self.spawn(brief("add a text helper"))
@@ -268,7 +268,10 @@ class JudgeReminderTests(LaneCase):
                          {"decision": "block", "reason": self.REASON.format("Lane beta, Lane alpha")})
         self.assertEqual(self.remind().stdout, "", "the same set must not block twice")
         state = self.state / "judge-reminder" / f"{SESSION}.json"
-        self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+        if os.name == "nt":
+            print("skip: NTFS keeps no POSIX modes, so the 0600 check cannot apply", file=sys.stderr)
+        else:
+            self.assertEqual(state.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("Lane", state.read_text(), "the reminder state holds hashes only")
         self.returned("third lane", description="Lane gamma")
         self.assertEqual(json.loads(self.remind().stdout)["reason"],

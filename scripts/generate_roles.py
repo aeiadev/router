@@ -59,6 +59,11 @@ CODEX_NOTES = {
 
 
 
+def source_bytes(path):
+    """Source pins hash LF bytes, so a CRLF checkout (autocrlf, a zip, an editor) still verifies."""
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def parse(text):
     match = re.fullmatch(r"---\n(.*?)\n---\n(.*)", text, re.DOTALL)
     if not match:
@@ -90,24 +95,24 @@ def toml(metadata, body, models, shared=False, base=None):
 
 
 def expected(root, pin=False):
-    routes = json.loads((root / "hooks/router/routes.json").read_text())
+    routes = json.loads((root / "hooks/router/routes.json").read_text(encoding="utf-8"))
     bases = {}
     toml_pins = {}
-    rows = (root / "agents/SHARED.sha256").read_text().splitlines()
+    rows = (root / "agents/SHARED.sha256").read_text(encoding="utf-8").splitlines()
     for row in rows:
         digest, name = row.split()
         if name.endswith(".py"):
             # A script row is hash-checked only; it is never parsed as a role.
             if name != BUDGET_ROW:
                 raise ValueError(f"unexpected pin row: {name}")
-            if not pin and hashlib.sha256((root / "agents" / name).read_bytes()).hexdigest() != digest:
+            if not pin and hashlib.sha256(source_bytes(root / "agents" / name)).hexdigest() != digest:
                 raise ValueError("shared script drift: scripts/budget.py")
             continue
         if name.endswith(".toml"):
             toml_pins[name] = digest
             continue
         path = root / "agents" / name
-        payload = path.read_bytes()
+        payload = source_bytes(path)
         if not pin and hashlib.sha256(payload).hexdigest() != digest:
             raise ValueError(f"shared role drift: agents/{name}")
         metadata, body = parse(payload.decode("utf-8"))
@@ -136,11 +141,11 @@ def expected(root, pin=False):
         raise ValueError("pins for unknown roles: " + ", ".join(sorted(toml_pins)))
     if pin:
         names = sorted(bases, key=lambda base: base + ".md")
-        rows = [hashlib.sha256((root / f"agents/{base}.md").read_bytes()).hexdigest() + f"  {base}.md" for base in names]
+        rows = [hashlib.sha256(source_bytes(root / f"agents/{base}.md")).hexdigest() + f"  {base}.md" for base in names]
         rows += [hashlib.sha256(wanted[f"codex/agents/{base}.toml"].encode("utf-8")).hexdigest()
                  + f"  ../codex/agents/{base}.toml" for base in names]
-        rows.append(hashlib.sha256((root / "agents" / BUDGET_ROW).read_bytes()).hexdigest() + "  " + BUDGET_ROW)
-        (root / "agents/SHARED.sha256").write_text("\n".join(rows) + "\n")
+        rows.append(hashlib.sha256(source_bytes(root / "agents" / BUDGET_ROW)).hexdigest() + "  " + BUDGET_ROW)
+        (root / "agents/SHARED.sha256").write_bytes(("\n".join(rows) + "\n").encode("utf-8"))
     return bases, wanted
 
 
@@ -151,17 +156,17 @@ def main():
     args = parser.parse_args()
     try:
         bases, wanted = expected(ROOT, pin=args.pin and not args.check)
-        actual = {str(path.relative_to(ROOT)) for folder, suffix in (("agents", "*.md"), ("codex/agents", "*.toml"))
+        actual = {path.relative_to(ROOT).as_posix() for folder, suffix in (("agents", "*.md"), ("codex/agents", "*.toml"))
                   for path in (ROOT / folder).glob(suffix)} - {f"agents/{base}.md" for base in bases}
         extra = actual - wanted.keys()
         drift = [name for name, text in wanted.items()
-                 if not (ROOT / name).is_file() or (ROOT / name).read_text() != text]
+                 if not (ROOT / name).is_file() or (ROOT / name).read_text(encoding="utf-8") != text]
         if extra or (args.check and drift):
             sys.exit("Role drift: " + ", ".join(sorted(extra | set(drift))) + "; run python3 scripts/generate_roles.py")
         if not args.check:
             for name, text in wanted.items():
                 (ROOT / name).parent.mkdir(parents=True, exist_ok=True)
-                (ROOT / name).write_text(text, encoding="utf-8")
+                (ROOT / name).write_bytes(text.encode("utf-8"))
         print(f"PASS: {len(bases)} shared roles and {len(wanted)} generated files match")
     except (OSError, ValueError, KeyError) as exc:
         sys.exit(str(exc))

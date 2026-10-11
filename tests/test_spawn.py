@@ -226,7 +226,7 @@ class SpawnTests(unittest.TestCase):
             self.assert_unchanged(allowed)
             errors = (self.state / "errors.jsonl").read_text()
             self.assertIn('"action":"connect"', errors)
-            self.assertIn(str(self.state / "ledger.sqlite3"), errors)
+            self.assertIn(json.dumps(str(self.state / "ledger.sqlite3")), errors)  # JSON escapes Windows backslashes
             self.assertIn("locked", errors)
         finally:
             blocker.execute("ROLLBACK")

@@ -26,6 +26,32 @@ PATH_ENV = ("ROUTER_HOME", "CLAUDE_HOME", "ROUTES_JSON", "ROUTER_STATE",
             "ROUTER_OFF_FILE", "ROUTER_OFF", "XDG_STATE_HOME")
 
 
+def not_stdlib(names):
+    """Names that are not standard-library modules; sys.stdlib_module_names is Python 3.10+."""
+    if hasattr(sys, "stdlib_module_names"):
+        return names - set(sys.stdlib_module_names)
+    import sysconfig
+    roots = {os.path.realpath(sysconfig.get_paths()[key]) + os.sep for key in ("stdlib", "platstdlib")}
+    # Windows puts standard-library extensions in DLLs, outside Lib; the
+    # embeddable distribution keeps them beside python.exe instead.
+    roots.add(os.path.realpath(os.path.join(sys.base_prefix, "DLLs")) + os.sep)
+    roots.add(os.path.realpath(os.path.join(sys.base_prefix,
+              f"python{sys.version_info.major}{sys.version_info.minor}.zip")) + os.sep)
+
+    def stdlib(name):
+        if name in sys.builtin_module_names:
+            return True
+        spec = importlib.util.find_spec(name)
+        origin = os.path.realpath(spec.origin) if spec and spec.origin else ""
+        if "site-packages" in origin:
+            return False
+        if (spec and isinstance(spec.loader, importlib.machinery.ExtensionFileLoader)
+                and os.path.dirname(origin) == os.path.realpath(sys.base_prefix)):
+            return True
+        return any(origin.startswith(root) for root in roots)
+    return {name for name in names if not stdlib(name)}
+
+
 def import_common():
     spec = importlib.util.spec_from_file_location("router_common_test", COMMON)
     module = importlib.util.module_from_spec(spec)
@@ -98,8 +124,9 @@ class CommonTests(unittest.TestCase):
         home = self.tmp / "installed"
         (home / "router").mkdir(parents=True)
         shutil.copytree(top / "hooks", home / "hooks")
-        (home / "router/common.py").symlink_to("../hooks/router/common.py")
-        (home / "router/routes.json").symlink_to("../hooks/router/routes.json")
+        # Relative link text in the native separator: Windows leaves a "/"-spelled relative link dangling.
+        (home / "router/common.py").symlink_to(os.path.join("..", "hooks", "router", "common.py"))
+        (home / "router/routes.json").symlink_to(os.path.join("..", "hooks", "router", "routes.json"))
         alone = self.tmp / "alone/bin/router"
         alone.parent.mkdir(parents=True)
         shutil.copy2(CLI, alone)
@@ -148,7 +175,7 @@ class CommonTests(unittest.TestCase):
                     names.update(item.name.split(".")[0] for item in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                     names.add(node.module.split(".")[0])
-            self.assertFalse(names - sys.stdlib_module_names - {"common"}, source.name)
+            self.assertFalse(not_stdlib(names - {"common"}), source.name)
 
     def test_route_table_has_only_public_required_sections(self):
         self.assertEqual(self.common.validate_routes(self.routes), [])

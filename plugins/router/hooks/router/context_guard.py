@@ -12,8 +12,8 @@ block exits 2. Logs carry sizes, counts and type names, never text or paths.
 import sys
 sys.dont_write_bytecode = True
 
+import contextlib
 import hashlib
-import fcntl
 import fnmatch
 import json
 import os
@@ -75,7 +75,7 @@ def base_record(data, event, mode) -> dict:
 
 def reports_dir(routes) -> str:
     configured = ctx_section(routes).get("reports_dir")
-    return str(Path(configured).expanduser() if configured else common.state_dir() / "reports")
+    return str(common.compat.expanduser(configured) if configured else common.state_dir() / "reports")
 
 
 def cap_for(c, routes) -> int:
@@ -210,7 +210,7 @@ def link_lane(data, c, message):
     if session is None or not isinstance(transcript, str) or not transcript:
         return
     try:
-        brief = common.brief_hash(first_prompt(Path(transcript).expanduser()))
+        brief = common.brief_hash(first_prompt(common.compat.expanduser(transcript)))
     except Exception as exc:  # unreadable transcript: link nothing, keep the class name only
         common.log("errors", {"script": "context_guard", "action": "lane_link", "error": type(exc).__name__})
         return
@@ -236,7 +236,7 @@ def handback_agent_type(data):
     session, agent = safe_name(data.get("session_id")), safe_name(data.get("agent_id"))
     if not (isinstance(transcript, str) and transcript and session and agent):
         return None
-    meta = Path(transcript).expanduser().parent / session / "subagents" / f"agent-{agent}.meta.json"
+    meta = common.compat.expanduser(transcript).parent / session / "subagents" / f"agent-{agent}.meta.json"
     try:
         value = json.loads(meta.read_text(encoding="utf-8")).get("agentType")
     except (OSError, ValueError, AttributeError):
@@ -302,7 +302,7 @@ def large_read(data, routes, tool_input, limit=None):
         return None
     if size is None or size <= (limit if limit is not None else ctx_section(routes).get("large_read_bytes", 24000)):
         return None
-    absolute = os.path.abspath(os.path.expanduser(path))
+    absolute = os.path.abspath(str(common.compat.expanduser(path)))
     if any(fnmatch.fnmatch(absolute, glob) for glob in ctx_section(routes).get("read_allow_globs", [])):
         return None
     mode = rule_mode(data, routes, "large_read")
@@ -345,8 +345,11 @@ def update_chain(data, routes, tool_name, tool_input, first=None):
     folder = common.state_dir() / "chain"
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     state_path = folder / f"{name}.json"
-    with open(folder / f"{name}.lock", "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(common.compat.locked(folder / f"{name}.lock"))
+        except common.compat.LockTimeout:
+            return None  # another hook of this session holds the counter: skip this update
         state, count, last_ms, group = load_chain_state(state_path)
         now = now_ms()
         spawned = common.last_spawn(session_id)
@@ -363,9 +366,7 @@ def update_chain(data, routes, tool_name, tool_input, first=None):
             if common.read_like(tool_name, tool_input):
                 count += 1
                 incremented = True
-        tmp = folder / f"{name}.json.{os.getpid()}.tmp"
-        tmp.write_text(json.dumps({"count": count, "last_ms": now, "group_calls": group}), encoding="utf-8")
-        os.replace(tmp, state_path)
+        common.compat.write_text(state_path, json.dumps({"count": count, "last_ms": now, "group_calls": group}))
     first, repeat = first if first is not None else chain_cfg["first"], chain_cfg["repeat"]
     if incremented and (count == first or (count >= repeat and count % repeat == 0)):
         return count
@@ -378,7 +379,7 @@ def allowed_read(data, routes, tool_name, tool_input):
     path = tool_input.get("file_path") if tool_name == "Read" else tool_input.get("path")
     if not isinstance(path, str) or not path:
         return False
-    absolute = os.path.abspath(os.path.join(data.get("cwd") or os.getcwd(), os.path.expanduser(path)))
+    absolute = os.path.abspath(os.path.join(data.get("cwd") or os.getcwd(), str(common.compat.expanduser(path))))
     return any(fnmatch.fnmatch(absolute, glob)
                for glob in ctx_section(routes).get("read_allow_globs", []))
 
@@ -406,8 +407,11 @@ def auto_block(data, routes, tool_name, tool_input):
     folder = common.state_dir() / "auto-chain"
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = folder / f"{name}.json"
-    with open(folder / f"{name}.lock", "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(common.compat.locked(folder / f"{name}.lock"))
+        except common.compat.LockTimeout:
+            return None  # skip this count; the next call counts again
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
             count, files = state["count"], state["files"]
@@ -426,13 +430,11 @@ def auto_block(data, routes, tool_name, tool_input):
         count = count + 1 if common.read_like(tool_name, tool_input) else 0
         file_path = tool_input.get("file_path")
         if tool_name in ("Edit", "Write") and isinstance(file_path, str) and file_path:
-            absolute = os.path.abspath(os.path.join(data.get("cwd") or os.getcwd(), os.path.expanduser(file_path)))
+            absolute = os.path.abspath(os.path.join(data.get("cwd") or os.getcwd(), str(common.compat.expanduser(file_path))))
             digest = hashlib.sha256(os.fsencode(absolute)).hexdigest()
             if digest not in files:
                 files.append(digest)
-        temporary = path.with_suffix(f".{os.getpid()}.tmp")
-        temporary.write_text(json.dumps({"count": count, "files": files, "spawned": spawned}), encoding="utf-8")
-        os.replace(temporary, path)
+        common.compat.write_text(path, json.dumps({"count": count, "files": files, "spawned": spawned}))
     return None
 
 
