@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from _platform import canonical_temp_root
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -41,7 +42,7 @@ class ReportCase(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="router-report-test-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = canonical_temp_root(temporary)
         self.state = self.root / "state"
         self.claude = self.root / "claude"
         self.db = self.state / "ledger.sqlite3"

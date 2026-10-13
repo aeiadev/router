@@ -10,7 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks/router"))
 import receipts
-from _platform import skip_unless_posix_modes, skip_unless_symlinks
+from _platform import canonical_temp_root, skip_unless_posix_modes, skip_unless_symlinks
 
 
 DIGEST = "a" * 64
@@ -22,7 +22,8 @@ class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="router-receipts-")
         self.addCleanup(self.temporary.cleanup)
-        self.state = Path(self.temporary.name) / "state"
+        self.root = canonical_temp_root(self.temporary)
+        self.state = self.root / "state"
         self.payload = {"alignment_digest": DIGEST, "requirements": ["R1", "R2"],
                         "artifact": {"revision": REVISION}}
 
@@ -209,7 +210,7 @@ class ReceiptTests(unittest.TestCase):
 
     @skip_unless_symlinks("receipt path rejection")
     def test_symlinked_storage_is_rejected_without_touching_target(self):
-        target = Path(self.temporary.name) / "target"
+        target = self.root / "target"
         target.mkdir()
         self.state.symlink_to(target, target_is_directory=True)
         with self.assertRaises(receipts.ReceiptError):
@@ -245,7 +246,7 @@ class ReceiptTests(unittest.TestCase):
     @skip_unless_symlinks("receipt database rejection")
     def test_symlinked_database_is_rejected_without_touching_target(self):
         self.state.mkdir()
-        target = Path(self.temporary.name) / "target.db"
+        target = self.root / "target.db"
         target.write_bytes(b"untouched")
         (self.state / "receipts.sqlite3").symlink_to(target)
         with self.assertRaises(receipts.ReceiptError):
@@ -254,7 +255,7 @@ class ReceiptTests(unittest.TestCase):
 
     @skip_unless_symlinks("receipt ancestor rejection")
     def test_symlinked_ancestor_rejects_creation_before_making_directories(self):
-        root = Path(self.temporary.name)
+        root = self.root
         target = root / "target"
         target.mkdir()
         link = root / "link"
@@ -274,7 +275,7 @@ class ReceiptTests(unittest.TestCase):
         self.create()
         database = self.state / "receipts.sqlite3"
         before = database.read_bytes()
-        root = Path(self.temporary.name)
+        root = self.root
         link = root / "link"
         link.symlink_to(root, target_is_directory=True)
         redirected = link / "state"
@@ -286,6 +287,28 @@ class ReceiptTests(unittest.TestCase):
             receipts.create_task("task_2", self.payload, state_dir=redirected)
         self.assertEqual(database.read_bytes(), before)
         self.assertEqual(receipts.get_task("task_1", state_dir=self.state)["attempts"], [])
+
+    @skip_unless_symlinks("canonical receipt fixture and lexical alias rejection")
+    def test_canonical_temporary_fixture_keeps_lexical_alias_unsafe(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent).resolve(strict=True)
+            real = root / "real"
+            real.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            temporary = tempfile.TemporaryDirectory(dir=alias)
+            with temporary:
+                state = canonical_temp_root(temporary) / "state"
+                receipts.create_task("safe", self.payload, state_dir=state)
+                database = state / "receipts.sqlite3"
+                before = database.read_bytes()
+                unsafe = Path(temporary.name) / "state"
+                with self.assertRaises(receipts.ReceiptError):
+                    receipts.get_task("safe", state_dir=unsafe)
+                with self.assertRaises(receipts.ReceiptError):
+                    receipts.create_task("other", self.payload, state_dir=unsafe)
+                self.assertEqual(database.read_bytes(), before)
+                self.assertIsNone(receipts.get_task("other", state_dir=state))
 
 
 if __name__ == "__main__":

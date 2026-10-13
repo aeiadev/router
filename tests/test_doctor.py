@@ -430,6 +430,8 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual((bad.returncode, bad.stdout), (2, ""))
 
     def test_capability_version_is_untrusted_input_and_does_not_probe_hosts(self):
+        self.codex = self.base / "private-codex-home"
+        self.env["CODEX_HOME"] = str(self.codex)
         self.install("both")
         marker = self.base / "host-ran"
         fake_bin = self.base / "fake-bin"
@@ -440,9 +442,11 @@ class DoctorTests(unittest.TestCase):
             script.chmod(0o755)
         env = dict(self.env, PATH=str(fake_bin) + os.pathsep + self.env.get("PATH", ""))
         before = self.snapshot()
-        rows = self.lines(self.run_doctor("--host", "codex", "--host-version", "0.156.1\nprivate", env=env))
+        sentinel = "private-version-sentinel-7q4"
+        rows = self.lines(self.run_doctor("--host", "codex", "--host-version", "0.156.1\n" + sentinel, env=env))
         self.assertIn("[info] capability version: unknown (invalid); reference 0.156.1; match=false; host unverified", rows)
-        self.assertNotIn("private", "\n".join(rows))
+        self.assertIn(str(self.codex), "\n".join(rows))
+        self.assertNotIn(sentinel, "\n".join(rows))
         self.assertFalse(marker.exists())
         self.assertEqual(self.snapshot(), before)
 

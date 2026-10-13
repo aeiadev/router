@@ -112,7 +112,7 @@ Native Windows and WSL keep separate installations; install in each one you use.
 
 Pair with [Harness](https://github.com/aeiadev/harness) for guarded commands and context restore; the shared Install both and Upgrade block above covers both tools. Check [Platforms](#platforms) for requirements.
 
-Use the [Router 0.4.0 release](https://github.com/aeiadev/router/releases/tag/v0.4.0)
+Use the [Router 0.4.1 release](https://github.com/aeiadev/router/releases/tag/v0.4.1)
 for this version. From its checkout:
 
 <!-- docs:skip -->

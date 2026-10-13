@@ -25,6 +25,11 @@ IS_WINDOWS = os.name == "nt"
 POSIX_MODES = not IS_WINDOWS  # NTFS keeps only a read-only flag; chmod 0o700 reads back as 0o777
 
 
+def canonical_temp_root(temporary):
+    """Canonical root for an ordinary TemporaryDirectory fixture, while it still exists."""
+    return Path(temporary.name).resolve(strict=True)
+
+
 def _under(path, folder):
     path, folder = ntpath.normcase(ntpath.normpath(path)), ntpath.normcase(ntpath.normpath(folder))
     return path == folder or path.startswith(folder.rstrip("\\") + "\\")

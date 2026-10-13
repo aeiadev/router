@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from _platform import run
+from _platform import canonical_temp_root, run
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = ROOT / "bin" / "router"
@@ -17,7 +17,7 @@ class UsageCliTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="router-usage-cli-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = canonical_temp_root(temporary)
         self.state = self.root / "state"
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith("ROUTER_") and key not in ("HOME", "USERPROFILE", "XDG_STATE_HOME")}

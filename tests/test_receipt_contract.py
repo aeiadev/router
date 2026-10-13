@@ -16,7 +16,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "hooks" / "router"))
-from _platform import home_env  # noqa: E402
+from _platform import canonical_temp_root, home_env  # noqa: E402
 import receipts  # noqa: E402
 
 
@@ -44,7 +44,7 @@ class ReceiptContractTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="router-receipt-contract-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = canonical_temp_root(temporary)
         self.state = self.root / "state"
         self.home = self.root / "home"
         self.home.mkdir()

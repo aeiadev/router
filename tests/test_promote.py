@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
-from _platform import BASH, IS_WINDOWS, posix  # noqa: E402
+from _platform import BASH, IS_WINDOWS, canonical_temp_root, posix  # noqa: E402
 sys.path.insert(0, str(ROOT / "hooks/router"))
 import common
 
@@ -23,7 +23,7 @@ class PromoteTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.home = Path(self.temporary.name)
+        self.home = canonical_temp_root(self.temporary)
         self.local = self.home / "config/router/routes.local.json"
         self.state = self.home / "state"
         self.env = dict(os.environ, HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / "config"),

@@ -12,7 +12,7 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 ROUTER = ROOT / "bin" / "router"
 sys.path.insert(0, str(ROOT / "tests"))
-from _platform import BASH, IS_WINDOWS, home_env, posix  # noqa: E402
+from _platform import BASH, IS_WINDOWS, canonical_temp_root, home_env, posix  # noqa: E402
 
 CLI = [BASH, posix(ROUTER)] if IS_WINDOWS else [sys.executable, "-B", str(ROUTER)]
 ALIGNMENT = "a" * 64
@@ -23,7 +23,7 @@ class ReceiptCliTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="router-receipt-cli-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = canonical_temp_root(temporary)
         self.state = self.root / "state"
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith("ROUTER_") and key not in ("HOME", "XDG_STATE_HOME", "CLAUDE_HOME", "CODEX_HOME")}

@@ -13,7 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
-from _platform import BASH, home_env, posix  # noqa: E402
+from _platform import BASH, canonical_temp_root, home_env, posix  # noqa: E402
 README = ROOT / "README.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
@@ -110,7 +110,7 @@ class DocsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        home = Path(self.tmp.name)
+        home = self.root = canonical_temp_root(self.tmp)
         self.env = {**os.environ, **home_env(home), "XDG_CONFIG_HOME": str(home / "config"),
                     "XDG_STATE_HOME": str(home / "state"), "CLAUDE_HOME": str(home / "claude"),
                     "CODEX_HOME": str(home / "codex"),
@@ -224,18 +224,18 @@ class DocsTests(unittest.TestCase):
                     self.fail(f"retired helper mentioned in {path}")
         result = self.run_cmd([BASH, posix(ROOT / "install.sh"), "--host", "claude"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((Path(self.tmp.name) / ("claude/router/bin/dispatch" + "-log.py")).exists())
+        self.assertFalse((self.root / ("claude/router/bin/dispatch" + "-log.py")).exists())
         old = os.environ.get("ROUTER_V02")
         self.assertIsNotNone(old, "ROUTER_V02 must be set from old-trees.sh")
         result = self.run_cmd([BASH, posix(Path(old) / "install.sh"), "--host", "codex"], env=released_env(self.env))
         self.assertEqual(result.returncode, 0, result.stderr)
         result = self.run_cmd([BASH, posix(ROOT / "install.sh"), "--host", "codex"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((Path(self.tmp.name) / ("codex/router/bin/dispatch" + "-log.py")).exists())
+        self.assertFalse((self.root / ("codex/router/bin/dispatch" + "-log.py")).exists())
 
     def test_retired_source_scan_excludes_nested_checkout_but_covers_owned_files(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve(strict=True)
             owned = root / "hooks/router/active.py"
             sibling = root / "harness/CHANGELOG.md"
             owned.parent.mkdir(parents=True)
@@ -273,7 +273,7 @@ class DocsTests(unittest.TestCase):
     def test_changelog_031_groups_pairing_and_limits(self):
         text = CHANGELOG.read_text()
         version = (ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "0.4.0")
+        self.assertEqual(version, "0.4.1")
         section = text.split("## 0.3.1\n", 1)[1].split("\n## 0.3.0\n", 1)[0]
         self.assertEqual(section.strip().split("\n\n", 1)[0], PAIRING_LINE)
         self.assertEqual(re.findall(r"(?m)^### (.+)$", section), ["Fixed", "Platforms", "Changed"])

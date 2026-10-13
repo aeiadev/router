@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+Pairs with Harness 0.4.1.
+
+- Canonicalize ordinary test fixture roots so the macOS temporary-directory alias does not trigger the existing storage-path protections. Explicit unsafe symlink paths remain rejected.
+- Make the doctor invalid-version test check its unique untrusted payload while accepting legitimate paths containing `private`.
+- Update release and pairing references; runtime behavior is unchanged.
+
 ## 0.4.0
 
 Pairs with Harness 0.4.0.

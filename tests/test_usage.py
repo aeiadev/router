@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from _platform import canonical_temp_root, skip_unless_symlinks
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks/router"))
 import usage
@@ -22,7 +23,7 @@ class UsageTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="usage-core-")
         self.addCleanup(temporary.cleanup)
-        self.state = Path(temporary.name) / "state"
+        self.state = canonical_temp_root(temporary) / "state"
 
     def declare(self, ids=None, host="codex", outcome="returned", task="task"):
         return usage.declare_task(task, {"host": host, "expected_event_ids": ids,
@@ -198,6 +199,29 @@ class UsageTests(unittest.TestCase):
                 usage.get_report(state_dir=link)
             with self.assertRaises(usage.UsageError):
                 usage.get_report(state_dir=link / ".." / "state")
+
+    @skip_unless_symlinks("canonical usage fixture and lexical alias rejection")
+    def test_canonical_temporary_fixture_keeps_lexical_alias_unsafe(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent).resolve(strict=True)
+            real = root / "real"
+            real.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            temporary = tempfile.TemporaryDirectory(dir=alias)
+            with temporary:
+                state = canonical_temp_root(temporary) / "state"
+                declaration = {"host": "codex", "expected_event_ids": [], "outcome": "returned"}
+                usage.declare_task("safe", declaration, state_dir=state)
+                database = state / "usage.sqlite3"
+                before = database.read_bytes()
+                unsafe = Path(temporary.name) / "state"
+                with self.assertRaises(usage.UsageError):
+                    usage.get_report(state_dir=unsafe)
+                with self.assertRaises(usage.UsageError):
+                    usage.declare_task("other", declaration, state_dir=unsafe)
+                self.assertEqual(database.read_bytes(), before)
+                self.assertEqual(len(usage.get_report(state_dir=state)["tasks"]), 1)
 
     def test_failed_retry_judge_and_unknown_acceptance(self):
         self.declare(["fail1", "fail2", "retry", "judge", "missing"])

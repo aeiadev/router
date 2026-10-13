@@ -20,7 +20,7 @@ No optimization is adopted automatically, even when screening succeeds.
 
 # Offline evaluator API (schema 1)
 
-From the 0.4.0 checkout, import `hooks/router/evaluation.py` with Router directory on `sys.path`; call `evaluate(data) -> dict`, raising `EvaluationError` for bounded invalid input. `verification_method(family, external_state=False, material=False) -> str` returns rubric advice only. No persistence, model call, host verification, or adoption side effect.
+From the 0.4.1 checkout, import `hooks/router/evaluation.py` with Router directory on `sys.path`; call `evaluate(data) -> dict`, raising `EvaluationError` for bounded invalid input. `verification_method(family, external_state=False, material=False) -> str` returns rubric advice only. No persistence, model call, host verification, or adoption side effect.
 
 Top level: exactly `manifest`, `runs`, `acceptance`. Manifest: `schema_version:1`, opaque `experiment_id`, `candidate_id`, nonnegative integer `seed`, `treatment` mapping changed control name to exact `{baseline,candidate}` values, `controls` containing exact `claude` and `codex` frozen baseline control objects, and `pairs` list. Each pair: opaque `pair_id`, `task_id`, family (`tinyanswer|singleedit|retryfix|fakeoperations`), SHA256 `prompt_digest`, SHA256 `rubric_hash`, `order` (`baseline-first|candidate-first`), integer `seed`.
 

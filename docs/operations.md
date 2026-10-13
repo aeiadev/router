@@ -35,7 +35,7 @@ Tool names must be exact. Set `available_tools` to `null` when visibility is
 unknown; an empty list means none are declared. A wildcard does not establish
 read-only authority or tool visibility.
 
-From the 0.4.0 checkout, run this complete synthetic preflight. It
+From the 0.4.1 checkout, run this complete synthetic preflight. It
 requests the custom agent `fixture-worker` unchanged and deliberately lacks a
 declared tool, so the command exits 3 without dispatching anything.
 
