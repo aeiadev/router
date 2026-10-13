@@ -1,6 +1,6 @@
 {
   "name": "shared-roles",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Nine base agent roles: sweeper, researcher, planner, builder, builder-in-place, judge, worker, test-writer and docs-writer.",
   "author": {
     "name": "AEIA",

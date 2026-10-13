@@ -121,6 +121,36 @@ class SpawnTests(unittest.TestCase):
                 elif got["decision"] == "block":
                     self.assertTrue(got["message"], "a blocked call must explain the next action")
 
+    def test_native_and_custom_passthrough_precedes_policy(self):
+        routes = copy.deepcopy(ROUTES)
+        routes["router"]["never"] = ["opus"]
+        routes["aliases"].update({"Explore": "researcher", "Plan": "planner",
+                                  "general-purpose": "worker"})  # legacy owner table
+        for role in ("Explore", "Plan", "general-purpose", "custom-helper"):
+            for model in (None, "inherit", "sonnet", "opus", "gpt-6-astra"):
+                for policy in ("off", "shadow", "enforce"):
+                    with self.subTest(role=role, model=model, policy=policy):
+                        modes = dict.fromkeys(ROUTES["router"]["modes"], policy)
+                        request = self.input("malformed brief", agent=role)
+                        if model is not None:
+                            request["model"] = model
+                        result = spawn_guard.decide(request, routes, modes, [])
+                        self.assertEqual(result["decision"], "allow")
+                        self.assertEqual(result["rule"], "passthrough")
+                        self.assertEqual(result["asked_type"], role)
+                        self.assertEqual(result["run_type"], role)
+                        self.assertEqual(result["run_model"], model)
+                        self.assertEqual(result["shadow"], [])
+                        self.assertIsNone(result["round"])
+
+    def test_native_and_custom_hook_skips_brief_and_logs_identity(self):
+        for role in ("Explore", "Plan", "general-purpose", "custom-helper"):
+            with self.subTest(role=role):
+                self.assert_unchanged(self.run_hook(self.input("malformed brief", agent=role, model="opus")))
+                record = json.loads((self.state / "spawns.jsonl").read_text().splitlines()[-1])
+                self.assertEqual((record["asked_type"], record["run_type"], record["rule"], record["round"]),
+                                 (role, role, "passthrough", None))
+
     def test_every_declared_agent_tier_routes(self):
         for base, levels in ROUTES["tiers"].items():
             for tier, spec in levels.items():

@@ -165,17 +165,23 @@ class CommonTests(unittest.TestCase):
         self.assertIn("no live ladders", listed.stdout)
         self.assertFalse((self.state / "ledger.sqlite3").exists())
 
-    def test_import_has_no_state_side_effects_and_stdlib_only(self):
+    def test_import_has_no_state_side_effects_and_closed_local_dependencies(self):
         self.assertFalse(self.state.exists(), "import created state")
         self.assertFalse((self.tmp / "router").exists(), "import created config")
-        for source in (COMMON, CLI):
+        # The operations parser is a pure local dependency of common. Check its
+        # imports too, so allowing that edge cannot admit arbitrary packages.
+        local_dependencies = {COMMON: {"operations"}, CLI: {"common"},
+                              COMMON.with_name("operations.py"): set()}
+        for source, allowed_local in local_dependencies.items():
             names = set()
             for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Import):
                     names.update(item.name.split(".")[0] for item in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                     names.add(node.module.split(".")[0])
-            self.assertFalse(not_stdlib(names - {"common"}), source.name)
+            self.assertEqual(not_stdlib(names), allowed_local, source.name)
+            for name in allowed_local:
+                self.assertTrue((COMMON.parent / f"{name}.py").is_file(), name)
 
     def test_route_table_has_only_public_required_sections(self):
         self.assertEqual(self.common.validate_routes(self.routes), [])

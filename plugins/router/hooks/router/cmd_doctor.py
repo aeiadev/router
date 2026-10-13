@@ -18,7 +18,7 @@ import subprocess
 import common
 import overlay
 
-HELP = "doctor [--host claude|codex]: read-only installation health report"
+HELP = "doctor [--host claude|codex] [--host-version VERSION]: read-only installation health report"
 SHARED_ROLES = frozenset(
     f"agents/{name}{ext}"
     for name in ("sweeper", "researcher", "planner", "builder", "builder-in-place",
@@ -290,7 +290,7 @@ def _router_on_path(command, windows=os.name == "nt"):
     return False
 
 
-def _report(host, home, root):
+def _report(host, home, root, host_version=None):
     print(f"Router doctor ({host}): {home}")
     result = []
     def emit(level, name, detail):
@@ -439,7 +439,7 @@ def _report(host, home, root):
     emit("warn" if skew or comparison_unknown else "ok", "skew",
          "unknown (checkout not found)" if checkout is None else
          "unknown (shared role not readable)" if comparison_unknown and not skew else
-         f"shared roles come from Harness {sibling_version}; upgrade it for the 0.3 roles" if skew else "none")
+         f"shared roles come from Harness {sibling_version}; upgrade it for the {'.'.join(checkout_version.split('.')[:2])} roles" if skew else "none")
     if host == "claude":
         for level, detail in common.plugin_report(home, checkout_version, _exists(manifest_path)):
             emit(level, "plugin", detail)
@@ -483,13 +483,27 @@ def _report(host, home, root):
         emit("FAIL", "spawn", "dry run failed (RoutesError)")
     for level, detail in _budget(home, host, root):
         emit(level, "budget", detail)
+    try:
+        if not Path(__file__).with_name("capabilities.py").is_file():
+            raise ImportError("local catalog unavailable")
+        import capabilities
+        rows = [f"[info] {name}: {detail}" for name, detail in
+                capabilities.render_rows(capabilities.describe(host, host_version))]
+    except Exception:
+        print("[info] capability version: unavailable (local catalog missing or unreadable)")
+    else:
+        for row in rows:
+            print(row)
     return result
 
 
 def main(argv):
     parser = argparse.ArgumentParser(prog="router doctor", description=HELP)
     parser.add_argument("--host", choices=("claude", "codex"))
+    parser.add_argument("--host-version")
     args = parser.parse_args(argv)
+    if args.host_version is not None and args.host is None:
+        parser.error("--host-version requires one explicit --host")
     homes = {"claude": common.claude_home(),
              "codex": common.compat.expanduser(os.environ.get("CODEX_HOME") or common.compat.home() / ".codex")}
     selected = [args.host] if args.host else [host for host, home in homes.items()
@@ -499,7 +513,7 @@ def main(argv):
     root = Path(common.__file__).resolve().parents[2]
     counts = {"ok": 0, "warn": 0, "FAIL": 0}
     for host in selected:
-        for level in _report(host, homes[host], root):
+        for level in _report(host, homes[host], root, args.host_version):
             counts[level] += 1
     print(f"doctor: {counts['ok']} ok, {counts['warn']} warn, {counts['FAIL']} fail")
     return 1 if counts["FAIL"] else 0

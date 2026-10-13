@@ -1,6 +1,6 @@
 # Router
 
-Get cheaper models for simple work, stronger models for hard work, and every result judged. A brief is checked before it costs a run, and active lanes are restored after compaction.
+Route simple work to cheaper models and harder work to stronger models. The owner has each returned result judged by a fresh seat; Claude Code checks repository briefs before a run, and active lanes are restored after compaction.
 
 Router routes bounded tasks in Claude Code and Codex CLI. Pair it with [Harness](https://github.com/aeiadev/harness) for checkpoint restore and context pressure signals.
 
@@ -34,9 +34,9 @@ A seat is a named agent role. The owner is the session coordinating the work. Ea
 
 ## How a brief flows
 
-Split work only when it divides cleanly, fits a clear four-line brief, has a verifier and saves more effort than delegation costs.
+Split repository work only when it divides cleanly, fits a clear four-line brief, has a verifier and saves more effort than delegation costs. For a service or other non-Git target, use the opt-in [operations profile](docs/operations.md) in 0.4.0.
 
-1. The owner writes `TASK`, `FILES`, `BAR` and `RETURN`.
+1. For repository work, the owner writes `TASK`, `FILES`, `BAR` and `RETURN`.
 2. Haiku handles a bounded read-only sweep. Sonnet builds in its own Git worktree.
 3. The worker returns five lines: `CHANGED`, `BAR`, `OUTPUT`, `NOT DONE`, `OPEN`.
 4. A fresh Opus judge reads the brief and result, inspects the files and runs the BAR itself. Its verdict is `PASS` or `SEND_BACK`. It never fixes the work.
@@ -112,7 +112,8 @@ Native Windows and WSL keep separate installations; install in each one you use.
 
 Pair with [Harness](https://github.com/aeiadev/harness) for guarded commands and context restore; the shared Install both and Upgrade block above covers both tools. Check [Platforms](#platforms) for requirements.
 
-From a local checkout:
+Use the [Router 0.4.0 release](https://github.com/aeiadev/router/releases/tag/v0.4.0)
+for this version. From its checkout:
 
 <!-- docs:skip -->
 ```bash
@@ -206,16 +207,18 @@ In Codex, send the same brief after invoking `$dispatch`. This simple check rout
 | `seat-exec-here` | `builder-in-place` |
 | `seat-judge` | `judge` |
 | `seat-sweep` | `sweeper` |
-| `general-purpose` | `worker` |
-| `Explore` | `researcher` |
-| `Plan` | `planner` |
 
-Old names and their existing tier variants are deprecated aliases until a later
-release. They share classification, tier rules and ladder history with the new
-names. `worker-std` and `worker-up` keep their names and tiers. The `redirect`
+The legacy `seat-*` names and tier variants are deprecated aliases. They share
+classification, tier rules and ladder history with the new names. The `redirect`
 mode governs compatibility routing. Codex rejects an alias without an installed
 TOML and names the canonical role to retry; rejected calls consume no round.
 Spawn logs record both `asked_type` and `run_type`.
+
+Native Claude agents (`Explore`, `Plan`, `general-purpose`) and custom agent
+names pass through unchanged, including their requested model and tools. Router
+does not lint their briefs, select a model, or count ladder attempts for them.
+Codex has no corresponding built-in names; an unlisted Codex agent also passes
+through as a custom type. Name a Router role explicitly to opt into its policy.
 
 The writer roles have no tier files. Claude injects their ladder model directly;
 Codex returns them to the owner when round three needs an upper role.
@@ -231,6 +234,21 @@ parent session's sandbox. Read-only access is enforced only if the parent starts
 restricted permission profile, using `-c default_permissions=<profile>` with a
 profile defined in the user/session configuration. The `-s` flag overrides that
 profile.
+
+For a Router-only Codex judge, use the optional
+[`harness-judge` profile fragment](codex/judge-permissions.toml). Merge its
+`[permissions.harness-judge.*]` tables into the Codex session configuration,
+preserving other tables and any existing `default_permissions`. The Router
+installer does not edit that configuration or select this profile. Start a
+dedicated verification session with `codex -c default_permissions=harness-judge`
+from the source repository, then spawn the judge there. Do not add `-s`: it
+overrides the selected profile. Set `TMPDIR` outside the repository before
+starting Codex. The profile allows temporary writes, keeps workspace roots
+read-only, and disables network access. If the BAR writes artifacts, run it in
+a disposable copy outside every workspace root. Inspect effective host
+permissions and return `SEND_BACK` if they do not protect the source or cannot
+run the BAR. This fragment's TOML and standalone install are tested; host
+enforcement still depends on the installed Codex version and session settings.
 
 The route table also names light, standard and upper tiers. Claude agent frontmatter
 matches that table. Codex has a TOML for every corresponding role: light sweeps use
@@ -248,11 +266,12 @@ instead of replacing them.
 The dispatch skill asks Codex to call `spawn_agent` with `agent_type`, `task_name`, `message`, and
 `fork_turns="none"`. Hooks see the tool name `collaborationspawn_agent`; the template
 uses matcher `.*spawn_agent`. Omit `model` and `reasoning_effort`: role TOML pins
-take precedence. On both hosts, explicit model arguments receive the shared
+take precedence. On both hosts, explicit Router roles receive the shared
 exclusion check. Top-tier model arguments, including `gpt-6-astra` and full Opus
-IDs such as `claude-opus-5-5`, require a valid visible up code even on unlisted
-roles. Judges, forks, and execution roles governed by the enforced ladder retain
-their existing tier behavior. These checks obey `router.modes.block_model`;
+IDs such as `claude-opus-5-5`, require a valid visible up code for governed roles.
+Native and custom types pass through with their requested model. Judges, forks,
+and execution roles governed by the enforced ladder retain their existing tier
+behavior. These checks obey `router.modes.block_model`;
 supplying a model argument alone is not a denial. See the
 [Codex instruction snippet](examples/CODEX.md.snippet).
 
@@ -367,7 +386,7 @@ package files unchanged. `router status` includes the mode. `router off` or
 | B2 window reminders | Live window when available | partial: rollout window or policy fallback |
 | C5 pressure nudges | Matching fresh pressure tightens thresholds | partial: enforce works; visibility unverified |
 | run_in_background exemption | Harness permits tracked Claude tasks | n/a: no parameter; `npm run dev &` stays blocked |
-| router report | Spawns, judge verdicts and readable tokens | partial: no verdicts; readable tokens only |
+| router report | Spawns, judge verdicts and opt-in persisted usage | partial: no verdicts; opt-in usage only |
 | Cache-hit % | Harness statusline can show it | not possible: no command statusline |
 | C7 plugins | Claude Code marketplace route above | not shipped |
 
@@ -417,16 +436,81 @@ The hooks write `ledger.sqlite3` under the state directory with file mode 0600 a
 | --- | --- |
 | `router ladder list\|reset` | List ladder keys or reset a key, which is archived. |
 | `router lanes` | Show recent lanes of this project; `--all` shows every project; `--session HASH` filters one session. |
-| `router report` | Show spawns, judge coverage, first pass rates, context blocks and readable token totals; `--since N` sets the window (such as `36h` or `7d`, default 7d, at most 90d) and `--json` prints the data as JSON. |
-| `router doctor` | Check installed hooks, roles, routes, versions and sibling skew without changing files; `--host claude` or `--host codex` checks one host. |
-| `router config path\|get\|set\|unset\|check` | Find, inspect, change or validate the local override. |
+| `router checklist` | Print the three completion evidence steps: inspection, acceptance review, and external readback. This is guidance; it does not run or record those checks. |
+| `router report` | Show spawns, judge coverage, first pass rates, context blocks and all-time opt-in persisted usage; `--since N` sets the routing window (such as `36h` or `7d`, default 7d, at most 90d) and `--json` prints the data as JSON. |
+| `router operations check --file PATH` | Validate an opt-in operations brief and exact declared tools before dispatch. Missing tools exit 3; unknown visibility remains unknown. `--file -` reads stdin. See [operations](docs/operations.md). |
+| `router observe --file PATH` | Compare supplied expected proof and independent readback without repair, replay or automatic gating. Valid PASS/FAIL/UNKNOWN reports exit 0. `--file -` reads stdin. |
+| `router evaluate --file PATH` | Score supplied paired experiment records and independent check references offline. Missing usage prevents an efficiency claim; no automatic adoption. `--file -` reads stdin. See [evaluation](docs/evaluation.md). |
+| `router usage declare TASK_ID --file PATH` / `router usage record TASK_ID --file PATH` / `router usage report [TASK_ID]` | Declare expected observations, record one normalized host observation, or read all-time usage. `--file -` reads stdin. |
+| `router doctor` | Check installed hooks, roles, routes, versions and sibling skew without changing files; `--host claude` or `--host codex` checks one host. `--host-version VERSION` requires one explicit `--host`. |
+| `router config path\|get\|set\|unset\|check\|migrate inheritance [--apply]` | Find, inspect, change or validate the local override; preview legacy unlisted fallback cleanup, or use `--apply` to save an exact private backup and change only its mode. |
+| `router status --agent NAME` | Show the requested and canonical agent type, whether Router governs it, and host limits. |
 | `router promote RULE --dry-run` | Preview promotion from shadow to enforce; `--since N` sets the evidence window (at most 90d); without dry run, report evidence is required unless `--force` is given. |
+| `router receipt create TASK_ID --file PATH` / `router receipt record TASK_ID --file PATH` / `router receipt show TASK_ID` | Explicitly create, record or show a local receipt. `--file -` reads a JSON object from stdin. Recording never accepts work automatically. |
 
 The local override path is `${XDG_CONFIG_HOME:-$HOME/.config}/router/routes.local.json`; set `ROUTER_LOCAL=PATH` to use another file. Apply [careful](examples/presets/careful.local.json), [medium](examples/presets/medium.local.json), or [small](examples/presets/small.local.json) by pointing `ROUTER_LOCAL` at it or copying it to the override path. `router config set` and `router promote` replace a symlinked overlay with a real 0600 file; the symlink target is untouched. An invalid override falls back to shipped routes for hooks and is reported by status, config check and doctor.
+
+The completion checklist is an explicit command. Inspect the changed files or diff; compare requirements with BAR evidence and record who performed the acceptance review; then observe any external state without repeating the mutation, recording evidence, not-applicable, or unknown. A reported PASS or recorded lane verdict does not establish independent acceptance. Router's Stop reminder requests acceptance review for returned lanes without a recorded review. Its compact restore note reports lane status without claiming acceptance. When Harness is installed too, its own Stop hook requests inspection after an indirect edit with no later successful read or diff. Each hook acts on its own condition; either can prompt, both can prompt, or both can remain silent. A successful inspection clears only the Harness inspection reminder, and a recorded lane review clears only Router's returned-lane reminder. Neither hook performs external readback or prints the full checklist automatically.
+
+Named native and custom agents already pass through without Router changing their requested model, whether it is absent, `inherit`, a pin in the agent definition, or an explicit model. Forks inherit from their parent. The old unlisted injection rule remains a fallback for unresolved types. `router config migrate inheritance` previews setting that legacy rule's mode to `off`; only `--apply` writes an override. It keeps model maps, pins, aliases and other settings, and refuses invalid or symlinked overrides. A repeat after cleanup makes no change.
 
 `router.modes.brief`, `router.modes.rerun` and `router.modes.judge_reminder` control brief checks, a same-session rerun block and judge reminders. `router.lane_labels` controls saved lane labels. `router.ladder_ttl_hours` controls the ladder window. Hint settings `context.prompt_roles` and `context.hint_every` tune scored hints and their rate limit; `router auto` selects off, suggest, nudge or enforce. Harness context-pressure nudges tighten read and chain thresholds when a fresh matching signal exists.
 
 Router picks the pressure host from `harness_host` first, then an explicit `--host` argument, and only then treats an event that carries `turn_id` as Codex; live Codex visibility of pressure nudges remains unverified.
+
+`router doctor` appends a static capability catalog for each selected host. With no `--host-version`, the host version is unknown. Supplying a version records caller input only; an exact match to the reference Claude 2.1.296 or Codex 0.156.1 version still leaves host capabilities unverified. Those reference versions came from version output, not capability tests. The catalog identifies adapter fixtures and fields consumed by source; it does not prove that a host supplies those fields, trusts hooks, enforces read-only roles, or supports live usage collection. Its suggested checks are manual and disposable; doctor performs none of them.
+
+## Usage accounting
+
+Usage accounting is an explicit, offline import. `router usage declare TASK_ID --file PATH` accepts a JSON declaration, `router usage record TASK_ID --file PATH` accepts one JSON observation, and `router usage report [TASK_ID]` reads saved observations. `PATH` can be `-` for stdin. Inputs must be UTF-8 JSON objects of at most 64 KiB; file inputs must be regular files. All three commands print sorted JSON. Reports alone create no state; declarations and observations live in a separate private `usage/usage.sqlite3` under `ROUTER_STATE`.
+
+Use opaque task, event, attempt and stream IDs (1–64 ASCII letters, digits, `_` or `-`), never paths or raw prompt text. An example declaration for `router usage declare demo_task --file declaration.json` is:
+
+```json
+{"host":"claude","expected_event_ids":["event_1"],"outcome":"returned"}
+```
+
+An example observation for `router usage record demo_task --file observation.json` is:
+
+```json
+{"adapter":"claude-message","context":{"event_id":"event_1","attempt_id":"attempt_1","stage":"worker","outcome":"returned"},"payload":{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5}}}}
+```
+
+Supported adapters are `claude-message`, `codex-turn`, `codex-cumulative` and `missing`. Use a stable host event ID or export ordinal for `event_id`, and submit finalized observations only; the tool cannot authenticate identity or infer one from token counts. `missing` takes an empty payload `{}` and records unavailable telemetry. Codex cumulative observations need a stable `stream_id` and increasing `sequence`; only an explicit sequence-zero `from_start` establishes complete prefix coverage. Declare the complete expected event ID inventory where known, or use `null` to mark it unknown. Unknown inventory, absent fields, gaps and missing attribution stay incomplete; a missing value is never treated as zero. Claude cache components are disjoint; Codex cache and reasoning counters are subsets and are not counted twice.
+
+`router report --since` still filters routing history only. Its usage section and `router usage report` show all-time persisted observations, including failed and abandoned attempts and judge events. The old default Claude transcript sampler has been retired; no command automatically scans private transcripts or Codex rollouts. Existing occupancy/statusline cost displays and bytes/4 budgets are separate. Usage reports have no independently verified acceptance, token efficiency or observed cost: acceptance is `unverified`, its denominator is zero, and those derived values remain N/A. These adapters describe deterministic host formats; live hook collection has not been verified.
+
+## Receipts
+
+Receipts are an explicit opt-in local record of a coordinator's claims. `router receipt create TASK_ID --file PATH` creates a new task, `router receipt record TASK_ID --file PATH` adds one event, and `router receipt show TASK_ID` reads the current snapshot. `--file -` reads stdin. The file path locates input only and is not stored in the receipt. There are no automatic hook writes, no automatic acceptance, and no live-host or usage claims from this command. Receipt data stays in Router's private local state directory; keep access to that directory private.
+
+Use opaque identifiers for tasks, events, attempts, actors, verifiers, requirements and evidence: 1–64 ASCII letters, digits, `_` or `-`. Do not use paths, URLs, hostnames or free text. `alignment_digest` is a 64-character lowercase hex digest. An optional `brief_id` is a 16- or 64-character lowercase hex digest. Artifact `revision` is a 40- or 64-character lowercase hex digest and `readback` is a 64-character lowercase hex digest; they identify content, not locations. Input must be a JSON object and is limited to 64 KiB. These synthetic examples can be saved as `create.json`, `running.json`, `returned.json` and `attestation.json`, then submitted in that order with the commands above:
+
+`create.json` for `router receipt create task_demo --file create.json`:
+
+```json
+{"alignment_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","requirements":["R1"],"artifact":{"revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+```
+
+`running.json` for `router receipt record task_demo --file running.json`:
+
+```json
+{"event_id":"event_1","kind":"attempt","attempt_id":"attempt_1","actor_id":"worker_1","revision":1,"state":"running"}
+```
+
+`returned.json` for `router receipt record task_demo --file returned.json`:
+
+```json
+{"event_id":"event_2","kind":"attempt","attempt_id":"attempt_1","actor_id":"worker_1","revision":1,"state":"returned"}
+```
+
+`attestation.json` for `router receipt record task_demo --file attestation.json`:
+
+```json
+{"event_id":"event_3","kind":"attestation","attempt_id":"attempt_1","verifier_id":"reviewer_1","revision":1,"artifact":{"revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"verdict":"PASS","evidence":{"R1":["evidence_1"]},"provenance":"coordinator-recorded"}
+```
+
+`returned` records an attempt's state. An attestation records a submitted verdict and opaque evidence references. The snapshot's `attestation_summary` may show a current coordinator-recorded PASS, but `verification` remains `unverified` with verdict `UNKNOWN` and provenance `unavailable`. `host-observed` provenance is reserved and rejected by this recording API. No submitted attestation establishes independent verification or acceptance.
 
 ## Adapt the routes
 
@@ -434,7 +518,7 @@ Edit a copy of [routes.json](hooks/router/routes.json), then set `ROUTES_JSON` t
 
 - `tiers` maps each base agent and tier to an agent file, model and effort. Keep the matching installed agent's frontmatter in sync.
 - Top-tier model checks use every `tiers.*.up.model` plus `router.top_tier_models`, a shared list of additional model names (initially `gpt-6-astra`, matching the upper and judge TOML pins). Keep this list in sync with edited TOML pins on both hosts. Names ignore case and surrounding whitespace; full Claude model IDs normalize to their family.
-- `router.types` classifies seats and built-in names. Preserve execution and judge classes if you want their ladder and fresh-context rules. Routing decisions use the class and tier.
+- `router.types` classifies Router seats. Preserve execution and judge classes if you want their ladder and fresh-context rules. Routing decisions use the class and tier.
 - Each rule in `router.modes` and `context.modes` accepts `off`, `shadow` or `enforce`. Off skips the rule. Shadow records what would happen without applying it. Enforce applies it. Both spawn adapters obey the same router mode keys, subject to the host differences above. Other enforced rules still apply when one rule is disabled. The global kill switch disables all of them.
 - `risk_globs`, `risk_words`, `up_codes` and `context.caps` tune scope signals, escalation reasons and return limits.
 
@@ -467,6 +551,22 @@ For Windows `no-proc`, readable command lines are matched in full. Inaccessible 
 Use `CLOSE_LANE_BASE` to choose the Git base for committed changes; the default is local `main`, then `master`, then `HEAD`. The check freezes the merge base before running the BAR. With the `HEAD` fallback, only working changes are checked, so specify a base when reviewing commits on another branch. `CLOSE_LANE_BAR_TIMEOUT` limits the check, defaulting to 900 seconds. Neither a scope check nor a passing BAR replaces the fresh judge.
 
 The verdict record is the ledger. Use `router lanes` and `router report` to inspect it.
+
+## Operations and observation
+
+Version 0.4.0 includes these opt-in features. An operations brief describes a service
+target, allowed action, proof and readback without requiring a Git worktree. The preflight reports declared missing
+tools before dispatch; it preserves the user's named agent and its configuration.
+A separate report-only observer compares supplied resulting-state proof and never
+replays or repairs a mutation. See [operations and observation](docs/operations.md)
+for the exact profile, commands, coordinator recipe and enforcement boundaries.
+
+## Offline evaluation
+
+The [offline evaluator](docs/evaluation.md) checks supplied paired experiment
+records against a frozen rubric and control manifest. It retains failed attempts,
+missing usage and independent-check evidence. Its result is conservative screening,
+not automatic acceptance, live-host verification or an optimization claim.
 
 ## Development
 

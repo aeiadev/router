@@ -1,9 +1,8 @@
 """router report [--since N] [--json]: what Router did lately, with advice. Nothing is changed.
 
 N is like 36h or 7d (default 7d, at most 90d). Sections: spawns by role and tier, judge coverage,
-first pass by tier, context guard counts, shadow hits, tokens by model and a few advice lines.
-Privacy: no label, brief, key or finding text is printed. Numbers only, never dollars.
-Codex: spawns and lanes are counted, there are no verdicts, and rollouts are not read for tokens.
+first pass by tier, context guard counts, shadow hits, all-time persisted usage and advice.
+Privacy: no label, brief, key or finding text is printed. Codex lanes have no verdicts.
 """
 import argparse
 import calendar
@@ -12,21 +11,17 @@ import re
 import sqlite3
 import sys
 import time
+from pathlib import Path
 
 import common
 import ledger
 
-HELP = "report [--since N] [--json]: spawns, judge coverage, first-pass rate, over-cap returns, shadow hits, tokens"
+HELP = "report [--since N] [--json]: routing window and all-time opt-in persisted usage"
 DEFAULT_SINCE = "7d"
 MAX_HOURS = 90 * 24
 LOG_TAIL_BYTES = 4 * 1024 * 1024
-TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024
-MAX_TRANSCRIPTS = 200
 HOSTS = {"c:": "claude", "x:": "codex"}
-USAGE_FIELDS = (("input", "input_tokens"), ("output", "output_tokens"),
-                ("cache_read", "cache_read_input_tokens"), ("cache_creation", "cache_creation_input_tokens"))
 NAME = re.compile(r"[A-Za-z0-9_.:\-]{1,60}")
-MODEL = re.compile(r"[A-Za-z0-9_.:/\-\[\]]{1,80}")
 WINDOW = re.compile(r"([1-9][0-9]{0,5})([hd])")
 
 
@@ -74,55 +69,6 @@ def read_log(name, since):
     return records
 
 
-def read_tokens(since):
-    """Token sums per model over Claude transcripts modified since; None when none is readable."""
-    root = common.claude_home() / "projects"
-    found = []
-    try:
-        for path in root.rglob("*.jsonl"):
-            try:
-                if not path.is_symlink() and path.is_file() and path.stat().st_mtime >= since:
-                    found.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
-    except OSError:
-        return {"root": str(root), "sampled": 0, "models": {}}
-    found.sort(key=lambda item: item[0], reverse=True)
-    models, sampled = {}, 0
-    for _, path in found[:MAX_TRANSCRIPTS]:
-        try:
-            with path.open("rb") as handle:
-                handle.seek(0, 2)
-                start = max(0, handle.tell() - TRANSCRIPT_TAIL_BYTES)
-                handle.seek(start)
-                raw = handle.read(TRANSCRIPT_TAIL_BYTES)
-        except OSError:
-            continue
-        sampled += 1
-        lines = raw.split(b"\n")
-        for line in lines[1:] if start > 0 else lines:
-            if b'"assistant"' not in line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            message = row.get("message") if isinstance(row, dict) and row.get("type") == "assistant" else None
-            model = message.get("model") if isinstance(message, dict) else None
-            usage = message.get("usage") if isinstance(message, dict) else None
-            if not isinstance(model, str) or model.startswith("<") or not isinstance(usage, dict):
-                continue
-            model = safe(model.strip(), MODEL, "")
-            if not model:
-                continue
-            total = models.setdefault(model, dict.fromkeys((name for name, _ in USAGE_FIELDS), 0))
-            for name, field in USAGE_FIELDS:
-                value = usage.get(field)
-                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                    total[name] += value
-    return {"root": str(root), "sampled": sampled, "models": models}
-
-
 def first_pass(verdicts, unknown) -> dict:
     """Per tier: briefs, first-pass count and rounds to PASS, from time-ordered (key, ts, verdict, round, tier)."""
     first, rounds = {}, {}
@@ -148,6 +94,7 @@ def first_pass(verdicts, unknown) -> dict:
 
 def collect(since, now) -> dict:
     """The whole report as plain data. Raises sqlite3.Error, OSError or ValueError on a broken ledger."""
+    import usage
     rows = ledger.report_rows(since)
     spawns = {}
     for key, role, tier, _ in rows["attempts"]:
@@ -197,7 +144,8 @@ def collect(since, now) -> dict:
                            "judged_rate": percent(judged, returned),
                            "codex_lanes": sum(1 for lane in rows["lanes"] if host_of(lane[0]) == "codex")},
         "first_pass": passes, "context": context, "shadow_hits": hits,
-        "tokens": read_tokens(since), "advice": advice[:3] or ["advice: none"],
+        "usage": usage.get_report(state_dir=Path(common.state_path()) / "usage"),
+        "advice": advice[:3] or ["advice: none"],
     }
 
 
@@ -230,16 +178,16 @@ def render(data, window) -> str:
     out += [f"large-read blocks: {ctx['large_read_blocks']} (shadow: {ctx['large_read_shadow']})",
             f"auto blocks: {ctx['auto_blocks']}", "", "shadow hits"]
     out += [f"{name}  {count}" for name, count in sorted(data["shadow_hits"].items())] or ["none"]
-    tokens = data["tokens"]
-    out += ["", "tokens by model"]
-    if not tokens["sampled"]:
-        out.append(f"tokens: no readable transcripts under {tokens['root']}")
-    else:
-        out.append(f"sampled {tokens['sampled']} transcripts")
-        out += table(("model", "input", "output", "cache_read", "cache_creation"),
-                     [(model, *(total[name] for name, _ in USAGE_FIELDS))
-                      for model, total in sorted(tokens["models"].items())]) if tokens["models"] else ["none"]
-    out += ["tokens: Codex rollouts are not read", "", "advice", *data["advice"]]
+    usage = data["usage"]
+    tasks = usage["tasks"]
+    known = [task["known_tokens"] for task in tasks if task["known_tokens"] is not None]
+    out += ["", "persisted usage (all time, opt-in)",
+            f"attempted tasks: {usage['attempted_tasks']}  independently accepted: 0 (unverified)",
+            f"known tokens: {sum(known) if known else 'N/A'}  "
+            f"complete tasks: {sum(task['tokens_complete'] for task in tasks)}  "
+            f"incomplete tasks: {sum(not task['tokens_complete'] for task in tasks)}",
+            "tokens per independently accepted task: N/A  observed cost: N/A",
+            "", "advice", *data["advice"]]
     return "\n".join(out)
 
 
@@ -256,11 +204,13 @@ def main(argv) -> int:
         print("router report: --since must be at most 90d", file=sys.stderr)
         return 2
     now = time.time()
-    path = ledger.ledger_path()
     try:
         data = collect(now - hours * 3600, now)
-    except (sqlite3.Error, OSError, ValueError) as exc:
-        print(f"router report: {path}: {exc}", file=sys.stderr)
+    except (sqlite3.Error, OSError, ValueError):
+        print("router report: request rejected by usage or ledger store", file=sys.stderr)
+        return 1
+    except ImportError:
+        print("router report: usage store unavailable", file=sys.stderr)
         return 1
     print(json.dumps(data, sort_keys=True, indent=2) if args.json else render(data, args.since))
     return 0

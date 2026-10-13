@@ -17,10 +17,11 @@ from unittest import mock
 sys.dont_write_bytecode = True
 from _platform import BASH, IS_WINDOWS, posix
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_LINE = ".".join((ROOT / "VERSION").read_text().strip().split(".")[:2])
 sys.path.insert(0, str(ROOT / "tests"))
 from _platform import BASH, IS_WINDOWS, posix, home_env  # noqa: E402
 sys.path.insert(0, str(ROOT / "hooks/router"))
-CHECK_ROW = re.compile(r"\[(?:ok|warn|FAIL)\] [a-z ]+: .+|  (?:edited|missing): .+|  .+ \(retired by an earlier release\)")
+CHECK_ROW = re.compile(r"\[(?:ok|warn|FAIL|info)\] [a-z_ ]+: .+|  (?:edited|missing): .+|  .+ \(retired by an earlier release\)")
 
 
 import _released_python
@@ -253,7 +254,7 @@ class DoctorTests(unittest.TestCase):
         self.install(tree=self.old_tree("HARNESS_V02"))
         self.install()
         rows = self.lines(self.run_doctor())
-        self.assertIn("[warn] skew: shared roles come from Harness 0.2.0 or earlier; upgrade it for the 0.3 roles", rows)
+        self.assertIn(f"[warn] skew: shared roles come from Harness 0.2.0 or earlier; upgrade it for the {RELEASE_LINE} roles", rows)
         sibling = self.claude / "harness/install-manifest.json"
         sibling.write_text("{")
         rows = self.lines(self.run_doctor())
@@ -414,6 +415,86 @@ class DoctorTests(unittest.TestCase):
         bad = self.run_doctor("--host", "other")
         self.assertEqual(bad.returncode, 2)
 
+    def test_capability_rows_are_append_only_and_version_is_explicit(self):
+        self.install("both")
+        baseline = self.lines(self.run_doctor("--host", "claude"))
+        supplied = self.lines(self.run_doctor("--host", "claude", "--host-version", "2.1.296"))
+        self.assertEqual([row for row in baseline if "capability " not in row],
+                         [row for row in supplied if "capability " not in row])
+        self.assertIn("[info] capability version: 2.1.296 (caller-supplied); reference 2.1.296; match=true; host unverified", supplied)
+        self.assertIn("[info] capability version: unknown (unavailable); reference 2.1.296; match=false; host unverified", baseline)
+        self.assertEqual(sum(row.startswith("[info] capability ") for row in supplied), 10)
+        both = self.lines(self.run_doctor())
+        self.assertEqual(sum(row.startswith("[info] capability version:") for row in both), 2)
+        bad = self.run_doctor("--host-version", "2.1.296")
+        self.assertEqual((bad.returncode, bad.stdout), (2, ""))
+
+    def test_capability_version_is_untrusted_input_and_does_not_probe_hosts(self):
+        self.install("both")
+        marker = self.base / "host-ran"
+        fake_bin = self.base / "fake-bin"
+        fake_bin.mkdir()
+        for name in ("claude", "codex"):
+            script = fake_bin / name
+            script.write_text(f"#!/bin/sh\nprintf called > '{marker}'\n", encoding="utf-8")
+            script.chmod(0o755)
+        env = dict(self.env, PATH=str(fake_bin) + os.pathsep + self.env.get("PATH", ""))
+        before = self.snapshot()
+        rows = self.lines(self.run_doctor("--host", "codex", "--host-version", "0.156.1\nprivate", env=env))
+        self.assertIn("[info] capability version: unknown (invalid); reference 0.156.1; match=false; host unverified", rows)
+        self.assertNotIn("private", "\n".join(rows))
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unavailable_catalog_preserves_health_and_read_only_behavior(self):
+        self.install("both")
+        copy = self.base / "checkout"
+        (copy / "hooks/router").mkdir(parents=True)
+        (copy / "bin").mkdir()
+        shutil.copy2(ROOT / "bin/router", copy / "bin/router")
+        for name in ("cmd_doctor.py", "capabilities.py", "common.py", "compat.py", "overlay.py", "routes.json"):
+            shutil.copy2(ROOT / "hooks/router" / name, copy / "hooks/router" / name)
+        shutil.copy2(ROOT / "VERSION", copy / "VERSION")
+        catalog = copy / "hooks/router/capabilities.py"
+        original = catalog.read_bytes()
+        marker = self.base / "host-ran"
+        fake_bin = self.base / "fake-bin"
+        fake_bin.mkdir()
+        for name in ("claude", "codex"):
+            script = fake_bin / name
+            script.write_text("#!/bin/sh\nprintf called > \"$HOST_MARKER\"\n")
+            script.chmod(0o755)
+        env = dict(self.env, HOST_MARKER=str(marker),
+                   PATH=str(fake_bin) + os.pathsep + self.env.get("PATH", ""),
+                   PYTHONPATH=str(ROOT / "hooks/router"))
+        for host in ("claude", "codex"):
+            catalog.write_bytes(original)
+            command = [sys.executable, "-B", str(copy / "bin/router"), "doctor", "--host", host]
+            def run():
+                return subprocess.run(command, env=env, capture_output=True, text=True,
+                                      stdin=subprocess.DEVNULL, timeout=20)
+            baseline = run()
+            health = [row for row in self.lines(baseline) if not row.startswith("[info] capability ")]
+            for content in (None, "def broken(:\n", "value = 1\n",
+                            "def describe(*args):\n    raise ValueError('private detail')\n",
+                            "def describe(*args):\n    return {}\n"
+                            "def render_rows(report):\n    yield ('capability partial', 'bad')\n"
+                            "    raise KeyError('private detail')\n"):
+                with self.subTest(host=host, content=content):
+                    if content is None:
+                        catalog.unlink()
+                    else:
+                        catalog.write_text(content)
+                    before = self.base_hash()
+                    result = run()
+                    rows = self.lines(result)
+                    self.assertEqual(result.returncode, baseline.returncode)
+                    self.assertEqual([row for row in rows if not row.startswith("[info] capability ")], health)
+                    self.assertEqual([row for row in rows if row.startswith("[info] capability ")],
+                                     ["[info] capability version: unavailable (local catalog missing or unreadable)"])
+                    self.assertFalse(marker.exists())
+                    self.assertEqual(self.base_hash(), before)
+
     def test_bad_file_matrix_has_no_traceback(self):
         self.install()
         version = (ROOT / "VERSION").read_text().strip()
@@ -490,7 +571,7 @@ class DoctorTests(unittest.TestCase):
         (copy / "hooks/router").mkdir(parents=True)
         (copy / "bin").mkdir()
         shutil.copy2(ROOT / "bin/router", copy / "bin/router")
-        for name in ("cmd_doctor.py", "common.py", "compat.py", "overlay.py", "routes.json"):
+        for name in ("cmd_doctor.py", "capabilities.py", "common.py", "compat.py", "overlay.py", "routes.json"):
             shutil.copy2(ROOT / "hooks/router" / name, copy / "hooks/router" / name)
         (copy / "VERSION").write_text("0.3.0\n")
         result = subprocess.run([sys.executable, str(copy / "bin/router"), "doctor"], env=self.env,
@@ -507,7 +588,7 @@ class DoctorTests(unittest.TestCase):
         (copy / "hooks/router").mkdir(parents=True)
         (copy / "scripts").mkdir()
         shutil.copy2(ROOT / "hooks/router/cmd_doctor.py", copy / "hooks/router/cmd_doctor.py")
-        for name in ("common.py", "compat.py", "overlay.py", "routes.json"):
+        for name in ("capabilities.py", "common.py", "compat.py", "overlay.py", "routes.json"):
             shutil.copy2(ROOT / "hooks/router" / name, copy / "hooks/router" / name)
         (copy / "VERSION").write_text("0.3.0\n")
         (copy / "bin").mkdir()
@@ -573,7 +654,7 @@ class DoctorTests(unittest.TestCase):
         before = self.base_hash()
         rows = rows or self.lines(self.run_doctor())
         self.assertEqual(self.base_hash(), before, "doctor wrote below the scratch home")
-        return [row for row in rows if re.fullmatch(r"\[(?:ok|warn|FAIL)\] plugin: .+", row)]
+        return [row for row in rows if re.fullmatch(r"\[(?:ok|warn|FAIL|info)\] plugin: .+", row)]
 
     def enable(self, *plugins):
         settings = self.claude / "settings.json"
@@ -673,7 +754,7 @@ class DoctorTests(unittest.TestCase):
         sibling.write_text(json.dumps(value))
         rows = self.lines(self.run_doctor())
         self.expect(rows, "[ok] sibling: Harness 0.2.5 installed")
-        self.expect_re(rows, r"\[warn\] skew: shared roles come from Harness 0\.2\.5; upgrade it for the 0\.3 roles")
+        self.expect_re(rows, rf"\[warn\] skew: shared roles come from Harness 0\.2\.5; upgrade it for the {re.escape(RELEASE_LINE)} roles")
 
     def test_harness_manifest_rejected_like_install(self):
         sibling = self.harness_then_router()
@@ -869,7 +950,7 @@ class DoctorTests(unittest.TestCase):
         result = subprocess.run(command, env=env,
                                 capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
         self.lines(result)
-        self.assertTrue(any(re.match(r"\[(?:ok|warn|FAIL)\] budget: ", row) for row in result.stdout.splitlines()))
+        self.assertTrue(any(re.match(r"\[(?:ok|warn|FAIL|info)\] budget: ", row) for row in result.stdout.splitlines()))
         self.assertEqual(sorted(path for path in self.base.rglob("*") if path not in before), [])
 
 

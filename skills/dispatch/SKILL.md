@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: Split work into four-line briefs, route each to a seat, verify each return with a fresh judge. Use for bounded parallel work, evidence sweeps, independent verification.
+description: Route bounded repository or operations/v1 briefs, then verify each return. Use for bounded parallel work, evidence sweeps, independent verification.
 ---
 
 # Dispatch
@@ -16,14 +16,16 @@ Dispatch a piece only when all four answers are yes:
 
 1. **Splits cleanly:** it can finish independently of the other pieces. Schedule
    dependent steps in order instead of running them in parallel.
-2. **Clean four-line brief:** a new worker can act from TASK, FILES, BAR, and RETURN
-   without the conversation that produced them.
-3. **A verifier exists:** someone can inspect the result and independently run the
-   BAR. A fresh judge will check every returned result.
+2. **Complete brief:** a repository worker can act from TASK, FILES, BAR, and RETURN;
+   an operations worker has an explicit `PROFILE: operations/v1` brief with target,
+   action, constraints, proof and readback.
+3. **A verifier exists:** someone can inspect the repository result and independently
+   run the BAR, or read back the operations target under enforced read-only access.
+   A fresh judge checks each return.
 4. **Worth the cost:** the saved time or independent evidence justifies the extra
    model calls and context. Keep a small direct question in the owner session.
 
-## Four-line brief
+## Repository four-line brief
 
 ```text
 TASK    One bounded job with a clear outcome.
@@ -32,7 +34,7 @@ BAR     The exact runnable check that proves the outcome.
 RETURN  Five lines: CHANGED / BAR / OUTPUT / NOT DONE / OPEN.
 ```
 
-Before dispatching, check that the brief has exactly one nonempty TASK, FILES, BAR,
+Before repository dispatch, check that the brief has exactly one nonempty TASK, FILES, BAR,
 and RETURN field, in that order. Free-text notes may follow the four fields.
 Reject incomplete or duplicate fields before starting work.
 
@@ -51,6 +53,33 @@ OUTPUT: PASS or FAIL and concise evidence.
 NOT DONE: incomplete or excluded work, or none.
 OPEN: one unresolved question, or none.
 ```
+
+## Operations profile (0.4.0)
+
+Use this opt-in branch only for an authorized service or other non-Git target.
+Start the brief with the exact line `PROFILE: operations/v1`, followed by unique,
+nonempty `OBJECTIVE`, `TARGET`, `ACTION`, `SCOPE`, `CONSTRAINTS`, `PROOF`,
+`READBACK`, `RETURN` fields in that order. Optional `REMOTE_IDENTITY`,
+`IDEMPOTENCY`, `ROLLBACK` follow in that order. Do not mix repository fields into
+this profile or create a worktree for a non-Git target. See
+[operations](https://github.com/aeiadev/router/blob/v0.4.0/docs/operations.md) for the full example and schema.
+
+Before any `Agent` or `spawn_agent` call, run `router operations
+check --file PATH` on a JSON request naming the original brief, selected agent,
+required tools and declared available tools. Missing declared tools exit 3: report
+the missing names and do not dispatch. Null availability means unknown, even on
+exit 0: verify host visibility before a consequential action. The preflight is
+advisory and grants no authority. Preserve the user's named native or custom
+agent, model, tools, permissions and payload through dispatch. Codex hooks cannot
+read the encrypted prompt, so the coordinator must validate this branch explicitly.
+Only `worker`, `sweeper`, `researcher`, `planner` and `judge` are eligible; builders
+and writers keep the repository brief and worktree contract.
+
+After a mutation, separately read the resulting state with an observer whose
+read-only access is enforced by credentials or host permissions. Compare the
+predeclared expected digest and observed proof with `router observe --file PATH`;
+its PASS, FAIL or UNKNOWN is report-only and never replays, repairs or authorizes
+a write. Return the evidence reference and unresolved proof to the owner.
 
 ## Choose a seat
 
@@ -80,7 +109,7 @@ follow the attempt ladder below. The route table controls each tier's model and 
 ## Codex dispatch
 
 Invoke this skill with `$dispatch`. Call `spawn_agent` with the installed
-`agent_type`, a stable `task_name`, the four-field brief in `message`, and
+`agent_type`, a stable `task_name`, the selected repository or operations brief in `message`, and
 `fork_turns="none"`. Omit `model` and `reasoning_effort`; the role TOML is the
 authoritative pin. Model arguments still receive the shared exclusion and up-code
 checks according to `router.modes`; their presence alone is not a denial.
@@ -93,7 +122,7 @@ message and are denied when `block_model` is enforced. Only execution upper role
 express the ladder request, and only with `ladder=enforce` after two accepted rounds.
 
 The hook cannot read `message`: Codex encrypts it in the hook payload. Validate
-TASK, FILES, BAR, and RETURN here before spawning. Each role's
+the applicable repository fields or operations profile here before spawning. Each role's
 `developer_instructions` must also reject a missing, empty, or duplicate field
 before work. Risk words, four-field lint, and prompt `route:` directives are not
 Codex hook checks. Send any extra findings as notes below the four fields.
@@ -118,7 +147,7 @@ return, and the target worktree or change reference. Do this for every return,
 including evidence sweeps. Do not resume an earlier judge or pass it the worker's
 conversation. The author never grades its own work.
 
-The judge stays read-only, opens the actual files, and re-runs the BAR itself.
+For repository work, the judge stays read-only, opens the actual files, and re-runs the BAR itself.
 It checks whether TASK is met, whether every changed path is inside FILES, and
 whether the return is accurate. Green tests do not excuse missing requirements.
 It never fixes findings. Its entire return is one verdict line: `PASS`, or
@@ -131,6 +160,14 @@ parent session's sandbox. Read-only access is enforced only if the parent starts
 a restricted permission profile defined in the user/session configuration and
 selected with `-c default_permissions=<profile>`. The `-s` flag overrides that
 profile.
+
+For a Router-only Codex install, the optional `codex/judge-permissions.toml`
+fragment supplies the `harness-judge` profile. Merge its profile tables into
+the session configuration without changing the default, then start a dedicated
+verification session with `codex -c default_permissions=harness-judge` and no
+`-s`. See the README's Codex judge recipe. The installer does not edit the
+session configuration; verify the host's effective permissions before treating
+the judge as restricted.
 
 Integrate only after PASS. Preserve unrelated changes and follow the project's
 normal review and integration rules. A judge's PASS is evidence of completion,

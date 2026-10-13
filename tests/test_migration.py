@@ -23,8 +23,7 @@ import test_install
 BRIEF = test_spawn.BRIEF
 TIMEOUT = test_spawn.TIMEOUT
 RENAMES = {"seat-exec": "builder", "seat-exec-here": "builder-in-place",
-           "seat-judge": "judge", "seat-sweep": "sweeper", "general-purpose": "worker",
-           "Explore": "researcher", "Plan": "planner"}
+           "seat-judge": "judge", "seat-sweep": "sweeper"}
 ALIASES = dict(RENAMES)
 for old, new in list(RENAMES.items())[:4]:
     for tier in ("light", "std", "up"):
@@ -184,7 +183,7 @@ class SharedRoles(unittest.TestCase):
                     self.assertEqual(left[field], right[field], field)
         self.assertIsNone(common.classify("unknown-role", routes))
         self.assertEqual(common.decide_spawn(dict(subagent_type="unknown-role", prompt=BRIEF),
-                                            routes, modes, [])["rule"], "inject-unlisted")
+                                            routes, modes, [])["rule"], "passthrough")
 
 
 class ClaudeAliases(test_spawn.SpawnTests):
@@ -221,7 +220,7 @@ class CodexAliases(test_codex.CodexSpawnTests):
                         for field in ("class", "tier", "decision", "brief", "rule", "round"):
                             self.assertEqual(left[field], right[field], field)
                         self.assertEqual(left["asked_type"], old)
-                        self.assertEqual(left["run_type"], new)
+                        self.assertEqual(left["run_type"], old)
 
     def test_missing_alias_denied_with_canonical_retry(self):
         self.assert_denied(self.hook(self.spawn("seat-exec")), "builder")
@@ -235,6 +234,9 @@ class CodexAliases(test_codex.CodexSpawnTests):
         for name in ("seat-exec", "seat-exec-up"):
             (agents / (name + ".toml")).write_text('name = "' + name + '"\n')
         self.assert_allowed(self.hook(self.spawn("seat-exec")))
+        log = json.loads((self.state / "spawns.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((log["asked_type"], log["run_type"], log["round"]),
+                         ("seat-exec", "seat-exec", 1))
         self.assert_allowed(self.hook(self.spawn("builder")))
         self.assert_denied(self.hook(self.spawn("seat-exec")), "builder-up")
         self.assert_allowed(self.hook(self.spawn("builder-up")))

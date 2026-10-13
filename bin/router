@@ -199,7 +199,10 @@ def main(argv=None):
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=BUILTINS)
     parser.add_argument("mode", nargs="?", choices=common.AUTO_MODES)
+    parser.add_argument("--agent", metavar="NAME", help="inspect effective policy for one agent (status only)")
     args = parser.parse_args(argv)
+    if args.agent is not None and (args.command != "status" or not args.agent.strip()):
+        parser.error("--agent requires router status and a non-empty name")
     if args.command == "auto":
         if args.mode is not None:
             skipped = common.refresh_defaults(args.mode)
@@ -222,12 +225,27 @@ def main(argv=None):
     if os.environ.get("ROUTER_OFF") == "1":
         print("ROUTER_OFF=1 is set; unset it to enable routing.")
     if args.command == "status":
-        print(f"auto: {common.auto_mode()}")
         routes, problem = common.load_routes_checked()
+        policy = common.effective_policy(routes, args.agent)
+        print(f"auto: {policy['auto']}")
         for section in ("router", "context"):
             for rule, mode in sorted(routes[section]["modes"].items()):
                 print(f"{section}.{rule}: {mode}")
         print(overlay_line(problem))
+        print(f"global: {policy['global']} (router off or ROUTER_OFF=1 disables every hook)")
+        print("auto guidance: off/suggest/nudge/enforce changes automatic suggestions; rule modes above govern hooks")
+        print(f"legacy unlisted fallback: {policy['legacy_key']}={policy['rules'].get(policy['legacy_key'], 'shadow')} "
+              "for unresolved types; named native/custom agents pass through")
+        if args.agent is not None:
+            print(f"agent requested: {policy['requested']}")
+            print(f"agent canonical: {policy['canonical']}")
+            print(f"agent behavior: {policy['behavior']}")
+            if policy['role_class']:
+                print(f"agent class: {policy['role_class']}")
+            print("redirect: " + policy['rules'].get('redirect', 'shadow') +
+                  ("; forced by enforced ladder or judge model rule" if policy['forced_redirect'] else ""))
+            print("host: Claude spawn hooks can enforce this policy; Codex spawn text is opaque, "
+                  "so its adapter cannot enforce the brief or rewrite a spawn")
         budget_lines()
         return 1 if problem else 0
     return 0

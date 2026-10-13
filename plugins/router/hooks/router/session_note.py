@@ -26,9 +26,9 @@ MAX_BYTES = 800
 MAX_LANES = 6
 ROUNDS = 3  # two standard rounds, then one upper-tier round
 LABEL_STEPS = (None, 40, 20, 10, 0)  # label lengths tried once only one lane is left
-ACTIONS = (("returned", "Spawn judge with the same TASK and FILES before closing."),
+ACTIONS = (("returned", "Request acceptance review with the same TASK, FILES and BAR. See router checklist."),
            ("running", "Running lanes finish on their own; see `router lanes`."))
-ALL_JUDGED = "All lanes judged."
+ALL_JUDGED = "Lane reviews recorded; acceptance still needs requirement evidence. See router checklist."
 
 
 def lane_line(lane, label_chars=None) -> str:

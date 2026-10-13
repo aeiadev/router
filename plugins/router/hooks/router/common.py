@@ -1,4 +1,4 @@
-"""Shared helpers for standalone routing hooks. Python 3.9+, standard library only.
+"""Shared helpers for standalone routing hooks. Python 3.9+, stdlib plus the pure operations parser.
 
 Paths are resolved from ROUTER_HOME, CLAUDE_HOME, ROUTES_JSON, ROUTER_STATE,
 XDG_STATE_HOME, and ROUTER_OFF_FILE. ROUTER_OFF=1 disables all routing.
@@ -772,6 +772,10 @@ def unprefixed(name):
 def canonical_role(agent_type, routes):
     """Resolve one deprecated name, preserving explicit tiers and unknown roles."""
     name = unprefixed(agent_type.strip()) if isinstance(agent_type, str) else ""
+    # Claude's built-in agents keep their host capabilities. These old aliases
+    # remain in route tables for compatibility, but are not Router seats.
+    if name.lower() in ("explore", "plan", "general-purpose"):
+        return name
     aliases = routes.get("aliases", {})
     return next((target for alias, target in aliases.items() if alias.lower() == name.lower()), name)
 
@@ -779,6 +783,8 @@ def canonical_role(agent_type, routes):
 def classify(agent_type, routes) -> dict | None:
     """Look up an agent type or tier agent name, case-insensitively; None when unknown."""
     name = canonical_role(agent_type, routes)
+    if name.lower() in ("explore", "plan", "general-purpose"):
+        return None
     wanted = (name or "worker").lower()
     types = _router(routes).get("types")
     if not isinstance(types, dict):
@@ -805,6 +811,33 @@ def classify(agent_type, routes) -> dict | None:
                 seat_key = find(seat.lower())
                 return None if seat_key is None else result(seat_key, tier)
     return None
+
+
+def passthrough(agent_type, routes) -> bool:
+    """A named host/custom agent outside Router seats and legacy seat aliases."""
+    return (isinstance(agent_type, str) and bool(agent_type.strip())
+            and not is_fork(agent_type) and classify(agent_type, routes) is None)
+
+
+def effective_policy(routes, agent_type=None):
+    """Summarize the hook policy for inspection without changing state or choosing a model."""
+    modes = routes["router"]["modes"]
+    unlisted = routes["router"].get("unlisted", {})
+    legacy_key = unlisted.get("mode_key", "inject_unlisted")
+    result = {"global": "off" if killed() else "on", "auto": auto_mode(),
+              "rules": {key: effective_mode(value) for key, value in modes.items()},
+              "legacy_key": legacy_key}
+    if agent_type is not None:
+        canonical = canonical_role(agent_type, routes)
+        category = ("fork" if is_fork(agent_type) else
+                    "passthrough" if passthrough(agent_type, routes) else "governed")
+        classified = classify(agent_type, routes) if category == "governed" else None
+        result.update(requested=agent_type, canonical=canonical, behavior=category,
+                      role_class=classified["class"] if classified else None,
+                      forced_redirect=bool(classified and
+                          ((classified["class"] == "exec" and effective_mode(modes.get("ladder")) == "enforce") or
+                           (classified["class"] == "judge" and effective_mode(modes.get("block_model")) == "enforce"))))
+    return result
 
 
 def route_line(prompt, routes) -> dict:
@@ -849,6 +882,16 @@ def brief_problem(prompt, role, routes) -> str | None:
     if classified is None:
         return None
     base = classified["base"]
+    if isinstance(prompt, str) and prompt.startswith("PROFILE: operations/v1"):
+        if base in ("builder", "builder-in-place"):
+            return "brief: operations profile requires a named custom agent or generic worker; builders require a repository brief"
+        if base in ("worker", "sweeper", "researcher", "planner", "judge"):
+            try:
+                import operations
+                operations.parse_brief(prompt)
+            except operations.OperationsError as exc:
+                return f"brief: {exc}"
+            return None
     brief = routes.get("brief", {})
     group = next((name for name in ("full", "read") if base in brief.get(name, {}).get("roles", [])), None)
     if group is None:
@@ -913,6 +956,15 @@ def brief_hash(prompt) -> str | None:
     """
     if not isinstance(prompt, str):
         return None
+    if prompt.startswith("PROFILE: operations/v1"):
+        try:
+            import operations
+            fields = operations.parse_brief(prompt)
+        except operations.OperationsError:
+            pass
+        else:
+            text = json.dumps(["operations/v1", fields["TARGET"], fields["SCOPE"]], ensure_ascii=False)
+            return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
     first = {}
     for name, text in brief_fields(prompt):
         first.setdefault(name, text)
@@ -1524,6 +1576,11 @@ def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin
             res["shadow"].append(rule)
         return None
 
+    if passthrough(raw_type, routes):
+        # Preserve the caller's model spelling and inheritance request in the
+        # status log; the hook does not select a model for this agent.
+        return finish("passthrough", run_model=ti.get("model"))
+
     never = {name.lower() for name in router.get("never", [])}
     if model in never:
         out = trip("never-model", "block_model", "This model is excluded by the route table.")
@@ -1701,12 +1758,10 @@ def decide_codex_spawn(tool_input, routes, modes, prior) -> dict:
         home = compat.expanduser(os.environ.get("CODEX_HOME") or compat.home() / ".codex")
         if not (home / "agents" / (role + ".toml")).is_file():
             if effective_mode(modes.get("redirect")) == "enforce":
-                result.update(decision="block", rule="codex-alias", updated=None, run_type=canonical,
+                result.update(decision="block", rule="codex-alias", updated=None,
                               message=f"Deprecated agent_type {role} has no installed TOML. Retry with agent_type {canonical} and the same task_name.")
                 return result
             result["shadow"].append("codex-alias")
-    if canonical != role and isinstance(role, str):
-        result["run_type"] = canonical
     if result["decision"] == "block":
         if result["rule"] == "ladder-needs-up" and "up" in levels:
             result["message"] = ("Round 3 requires agent_type " + levels["up"]["agent"]

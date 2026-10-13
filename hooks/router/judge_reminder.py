@@ -2,8 +2,7 @@
 """Judge reminder: the main session's Stop hook (Claude only).
 
 When builder lanes of this session have returned and no judge has looked at them (a judge return,
-UNKNOWN verdict included, marks a lane judged), block the stop once:
-{"decision":"block","reason":"returned without a judge: <labels>; spawn judge with the same TASK and FILES"}.
+UNKNOWN verdict included, marks a lane reviewed), block the stop once to request acceptance review.
 The same set of lanes never blocks twice; a changed set blocks again. Silent under the kill switch,
 when stop_hook_active is set, under `router auto off`, in mode off, and when the ledger is missing
 or unreadable (the ledger logs its path). Shadow mode only logs.
@@ -29,7 +28,7 @@ except (OSError, ImportError, SyntaxError) as exc:
     sys.exit(1)
 
 DEFAULT_MODE = "enforce"
-REASON = "returned without a judge: {labels}; spawn judge with the same TASK and FILES"
+REASON = "Acceptance review pending for returned lanes: {labels}; give judge the same TASK, FILES and BAR. See router checklist."
 MAX_LABELS = 5
 MAX_REASON_BYTES = 600
 

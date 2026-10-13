@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""`router report`: ledger tables, log counts, token sums and advice, against temporary state.
+"""`router report`: routing window and explicit persisted usage, against temporary state.
 
 The ledger is built through ledger.py's own writers with explicit times. Nothing here calls a model
-or the network. The Claude transcript row shape is reasoned from common.session_model, not verified
-against a live session.
+or the network.
 """
 import contextlib
 import io
@@ -149,7 +148,7 @@ class LedgerSectionTests(ReportCase):
         self.assertEqual((code, err), (0, ""))
         data = json.loads(out)
         self.assertEqual(sorted(data), ["advice", "context", "first_pass", "judge_coverage", "now", "shadow_hits",
-                                        "since", "spawns", "tokens"])
+                                        "since", "spawns", "usage"])
         self.assertEqual(out, json.dumps(data, sort_keys=True, indent=2) + "\n")
         self.assertEqual(data["judge_coverage"]["judged"], 3)
         for text in (out, self.run_report()[1]):
@@ -164,7 +163,7 @@ class LedgerSectionTests(ReportCase):
         os.environ["CLAUDE_HOME"] = str(self.claude)
         self.build()
         out = self.run_report()[1]
-        self.assertIn("b1", out)
+        self.assertNotIn("b1b1", out)
         self.assert_private(out)
 
     def test_setup_pins_home_config_and_overlay(self):
@@ -194,12 +193,13 @@ class LedgerSectionTests(ReportCase):
         self.assertFalse(self.db.exists())
         self.assertFalse(self.state.exists(), "a report must not create the state directory")
 
-    def test_broken_ledger_exits_one_with_the_path(self):
+    def test_broken_ledger_exits_one_without_private_details(self):
         self.state.mkdir(mode=0o700)
         self.db.write_bytes(b"not a sqlite database\n" * 64)
         code, out, err = self.run_report()
         self.assertEqual((code, out), (1, ""))
-        self.assertRegex(err, r"\Arouter report: " + re.escape(str(self.db)) + r": .+\n\Z")
+        self.assertEqual(err, "router report: request rejected by usage or ledger store\n")
+        self.assertNotIn(str(self.db), err)
 
 
 class LadderAttributionTests(ReportCase):
@@ -294,27 +294,39 @@ class LogSectionTests(ReportCase):
         self.assertRegex(self.run_report("--since", "90d")[1], r"(?m)^auto blocks: 1$")
 
 
-class TokenTests(ReportCase):
-    def test_sums_per_model_and_skips_synthetic_bad_and_old_files(self):
+class UsageSectionTests(ReportCase):
+    def test_old_transcript_sentinel_is_never_scanned(self):
         usage = dict(input_tokens=10, output_tokens=5, cache_read_input_tokens=100, cache_creation_input_tokens=7)
         self.transcript("a.jsonl", [assistant("claude-sonnet-x", **usage), "not json at all",
                                     assistant("claude-sonnet-x", **usage), assistant("claude-opus-y", **usage),
                                     assistant("<synthetic>", **usage), {"type": "user", "message": {"role": "user"}}])
         self.transcript("b.jsonl", [assistant("claude-old-z", **usage)], age=30 * DAY)
-        out = self.run_report()[1]
-        self.assertRegex(out, r"(?ms)^tokens by model\nsampled 1 transcripts\n"
-                              r"model +input +output +cache_read +cache_creation\n"
-                              r"claude-opus-y +10 +5 +100 +7\nclaude-sonnet-x +20 +10 +200 +14\n"
-                              r"tokens: Codex rollouts are not read\n")
+        with patch.object(Path, "rglob", side_effect=AssertionError("raw transcript scan")):
+            out = self.run_report()[1]
+        self.assertIn("persisted usage (all time, opt-in)", out)
+        self.assertNotIn("sampled", out)
+        self.assertNotIn("tokens by model", out)
+        self.assertNotIn("claude-sonnet-x", out)
         self.assertNotIn("claude-old-z", out)
         self.assertNotIn("<synthetic>", out)
         self.assertNotIn("SENTINEL_REPLY_4D", out)
-        self.assertNotRegex(out, r"\$|dollar|cost")
+        self.assertNotRegex(out, r"\$|dollar")
 
-    def test_no_readable_transcripts(self):
+    def test_no_persisted_usage(self):
         out = self.run_report()[1]
-        self.assertIn(f"tokens by model\ntokens: no readable transcripts under {self.claude / 'projects'}\n"
-                      "tokens: Codex rollouts are not read\n", out)
+        self.assertIn("persisted usage (all time, opt-in)\nattempted tasks: 0", out)
+        data = json.loads(self.run_report("--json")[1])
+        self.assertEqual(data["usage"]["attempted_tasks"], 0)
+        self.assertEqual(data["usage"]["acceptance_state"], "unverified")
+
+    def test_persisted_usage_is_all_time(self):
+        import usage
+        usage.declare_task("old_task", {"host": "claude", "expected_event_ids": [], "outcome": "abandoned"},
+                           state_dir=self.state / "usage")
+        data = json.loads(self.run_report("--since", "1h", "--json")[1])
+        self.assertEqual(data["usage"]["attempted_tasks"], 1)
+        self.assertEqual(data["usage"]["tasks"][0]["task_id"], "old_task")
+        self.assertEqual(data["usage"]["tokens_per_independently_accepted_task"], None)
 
 
 class AdviceTests(ReportCase):
@@ -389,11 +401,10 @@ class WholeReportTest(ReportCase):
             r"context\.large_read  1",
             r"spawn\.role-pin  1",
             "",
-            "tokens by model",
-            "sampled 1 transcripts",
-            r"model +input +output +cache_read +cache_creation",
-            r"claude-sonnet-x +3 +4 +0 +0",
-            "tokens: Codex rollouts are not read",
+            r"persisted usage \(all time, opt-in\)",
+            r"attempted tasks: 0  independently accepted: 0 \(unverified\)",
+            "known tokens: N/A  complete tasks: 0  incomplete tasks: 0",
+            "tokens per independently accepted task: N/A  observed cost: N/A",
             "",
             "advice",
             r"advice: 1 builder return\(s\) were never judged; spawn judge with the same TASK and FILES\.",

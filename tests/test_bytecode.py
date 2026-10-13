@@ -2,6 +2,7 @@
 """Entry points must disable bytecode before importing local modules."""
 import ast
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -27,7 +28,17 @@ VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 ROUTES = json.loads((ROOT / "hooks/router/routes.json").read_text(encoding="utf-8"))
 HOOK_SCRIPTS = {"codex_spawn_guard.py", "context_guard.py", "judge_reminder.py", "prompt_hint.py",
                 "session_note.py", "spawn_guard.py"}
+DIRECT_REPORTS = {"cmd_observe.py", "cmd_evaluate.py"}
 PYTHON_ROW = r"\[ok\] python: 3\.\d+\.\d+ \(.+\)"
+CAPABILITY_IDS = ("role_discovery", "model_pins_inheritance", "hook_payload_fields",
+                  "trusted_hook_lifecycle", "tool_rewrites", "completion_events",
+                  "tool_visibility", "read_only_enforcement", "usage_formats")
+
+
+def capability_rows(host):
+    reference = "2.1.296" if host == "claude" else "0.156.1"
+    return [re.escape(f"[info] capability version: unknown (unavailable); reference {reference}; match=false; host unverified"),
+            *(rf"\[info\] capability {name}: [^\n]+; host unverified; [^\n]+" for name in CAPABILITY_IDS)]
 
 
 def status_rows(state, budget):
@@ -35,7 +46,10 @@ def status_rows(state, budget):
     modes = [f"{section}.{rule}: {mode}" for section in ("router", "context")
              for rule, mode in sorted(ROUTES[section]["modes"].items())]
     return [re.escape(row) for row in ("on", f"switch: {state / 'OFF'}", "auto: nudge", *modes,
-                                       "overlay: off (ROUTER_LOCAL=off)")] + budget
+                                       "overlay: off (ROUTER_LOCAL=off)",
+                                       "global: on (router off or ROUTER_OFF=1 disables every hook)",
+                                       "auto guidance: off/suggest/nudge/enforce changes automatic suggestions; rule modes above govern hooks",
+                                       "legacy unlisted fallback: inject_unlisted=enforce for unresolved types; named native/custom agents pass through")] + budget
 
 
 def budget_row(name):
@@ -62,7 +76,8 @@ def installed_doctor_rows(host, home, running):
     rows += [e(f"[ok] routes: shipped table valid ({(running / 'hooks' / 'router').resolve() / 'routes.json'})"),
              e("[ok] overlay: off (ROUTER_LOCAL=off)"), e("[warn] last hook write: none yet"),
              e("[ok] errors: none"), e("[ok] spawn: dry run allowed a sweeper brief"),
-             r"\[ok\] budget: router \d+ tokens always-on \(estimate, ceiling \d+\)"]
+             r"\[ok\] budget: router \d+ tokens always-on \(estimate, ceiling \d+\)",
+             *capability_rows(host)]
     return rows
 
 
@@ -70,6 +85,30 @@ def doctor_summary(rows):
     """The final doctor line, counted from the expected row patterns."""
     count = lambda level: sum(row.startswith(rf"\[{level}\]") for row in rows)
     return re.escape(f"doctor: {count('ok')} ok, {count('warn')} warn, {count('FAIL')} fail")
+
+
+def interpreter_prefix(env, cwd):
+    """Ask the child interpreter where it mirrors bytecode, if anywhere."""
+    result = subprocess.run([sys.executable, "-c", "import sys; print(sys.pycache_prefix or '')"],
+                            env=env, cwd=cwd, capture_output=True, text=True,
+                            stdin=subprocess.DEVNULL, timeout=10, check=True)
+    return Path(result.stdout.strip()) if result.stdout.strip() else None
+
+
+def mirrored_cache_root(prefix, tree):
+    """CPython drops the drive and mirrors the absolute source path."""
+    relative = ntpath.splitdrive(str(tree))[1].replace("\\", "/").lstrip("/")
+    return prefix / relative
+
+
+def written_bytecode(base, prefix):
+    """Find copied application bytecode, locally or in CPython's mirrored prefix."""
+    found = {path for path in base.rglob("*.pyc")
+             if prefix is None or not path.is_relative_to(prefix)}
+    if prefix is not None:
+        for tree in {base, base.resolve()}:
+            found.update(mirrored_cache_root(prefix, tree).rglob("*.pyc"))
+    return found
 
 
 class BytecodeTests(unittest.TestCase):
@@ -99,8 +138,9 @@ class BytecodeTests(unittest.TestCase):
                                         env=env, capture_output=True, text=True,
                                         stdin=subprocess.DEVNULL, timeout=30)
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
-                self.assertEqual(list(installed.rglob("__pycache__")), [])
-                self.assertEqual(list(installed.rglob("*.pyc")), [])
+                prefix = interpreter_prefix(env, installed)
+                for app in (installed / "router/bin", installed / "hooks/router"):
+                    self.assertEqual(written_bytecode(app, prefix), set())
 
     def test_prelude_precedes_other_imports(self):
         files = [ROOT / "bin/router"] + list((ROOT / "hooks/router").glob("*.py"))
@@ -110,9 +150,9 @@ class BytecodeTests(unittest.TestCase):
                 isinstance(node, ast.If) and "__main__" in ast.unparse(node.test) for node in tree.body):
                 continue
             body = tree.body
-            first_import = next(i for i, node in enumerate(body)
+            first_import = next((i for i, node in enumerate(body)
                                 if isinstance(node, (ast.Import, ast.ImportFrom)) and
-                                not (isinstance(node, ast.Import) and len(node.names) == 1 and node.names[0].name == "sys"))
+                                not (isinstance(node, ast.Import) and len(node.names) == 1 and node.names[0].name == "sys")), len(body))
             assignment = next((i for i, node in enumerate(body) if isinstance(node, ast.Assign) and
                                any(isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and
                                    target.value.id == "sys" and target.attr == "dont_write_bytecode"
@@ -133,6 +173,9 @@ class BytecodeTests(unittest.TestCase):
             env.update(XDG_CONFIG_HOME=str(root / "config"),
                        XDG_STATE_HOME=str(root / "state"), ROUTER_LOCAL="off",
                        ROUTER_STATE=str(root / "state/router"), ROUTER_PYTHON=sys.executable)
+            prefix = interpreter_prefix(env, root)
+            app_roots = (root / "bin", root / "hooks/router")
+            before_bytecode = {app: written_bytecode(app, prefix) for app in app_roots}
             event = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "probe",
                                 "prompt": "Implement the requested feature here", "tool_name": "Read",
                                 "tool_input": {"file_path": "source.py"}})
@@ -151,7 +194,8 @@ class BytecodeTests(unittest.TestCase):
                       e(f"[ok] routes: shipped table valid ({(root / 'hooks' / 'router').resolve() / 'routes.json'})"),
                       e("[ok] overlay: off (ROUTER_LOCAL=off)"), e("[warn] last hook write: none yet"),
                       e("[ok] errors: none"), e("[ok] spawn: dry run allowed a sweeper brief"),
-                      e("[warn] budget: unavailable (scripts/budget.py is missing)")]
+                      e("[warn] budget: unavailable (scripts/budget.py is missing)"),
+                      *capability_rows("claude")]
             status = status_rows(root / "state/router", [e("budget: unavailable (scripts/budget.py is missing)")])
             for command, code, rows in (("status", 0, status), ("doctor", 1, doctor + [doctor_summary(doctor)])):
                 result = subprocess.run(entry_command(root / "bin/router", command), input=event, text=True,
@@ -160,14 +204,56 @@ class BytecodeTests(unittest.TestCase):
                 self.assertRegex(result.stdout, "\\A" + "".join(row + "\n" for row in rows) + "\\Z")
             scripts = {script.name for script in (root / "hooks/router").glob("*.py")
                        if 'if __name__ == "__main__"' in script.read_text()}
-            self.assertEqual(scripts, HOOK_SCRIPTS)
-            for name in sorted(scripts):
+            self.assertEqual(scripts, HOOK_SCRIPTS | DIRECT_REPORTS | {"completion.py"})
+            for name in sorted(HOOK_SCRIPTS):
                 # As installed: through pyrun.sh, which keeps Apple Python from caching the stdlib.
                 result = subprocess.run([BASH, posix(root / "hooks/router/pyrun.sh"), "router", "warn", name],
                                         input=event, text=True, capture_output=True, env=env, timeout=30)
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""), name)
-            self.assertEqual(list(root.rglob("*.pyc")), [])
-            self.assertEqual(list(root.rglob("__pycache__")), [])
+            checklist = subprocess.run([sys.executable, str(root / "hooks/router/completion.py")],
+                                       stdin=subprocess.DEVNULL, text=True, capture_output=True,
+                                       env=env, timeout=30)
+            self.assertEqual((checklist.returncode, checklist.stderr), (0, ""))
+            self.assertTrue(checklist.stdout.startswith("Inspection: "))
+            self.assertIn("External readback: ", checklist.stdout)
+            state = root / "state"
+            before_reports = {path.relative_to(state): path.read_bytes() for path in state.rglob("*") if path.is_file()}
+            for name in sorted(DIRECT_REPORTS):
+                report = subprocess.run([sys.executable, str(root / "hooks/router" / name), "--file", "-"],
+                                        stdin=subprocess.DEVNULL, text=True, capture_output=True,
+                                        env=env, timeout=30)
+                self.assertEqual(report.returncode, 1, name)
+                self.assertEqual(report.stdout, "", name)
+                self.assertLess(len(report.stderr), 256, name)
+            after_reports = {path.relative_to(state): path.read_bytes() for path in state.rglob("*") if path.is_file()}
+            self.assertEqual(after_reports, before_reports, "direct reports changed state")
+            self.assertEqual({app: written_bytecode(app, prefix) for app in app_roots}, before_bytecode)
+            self.assertEqual(before_bytecode, {app: set() for app in app_roots})
+
+    def test_copied_application_cache_is_found_locally_and_in_mirrored_prefix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            app = root / "hooks/router"
+            app.mkdir(parents=True)
+            (app / "helper.py").write_text("value = 1\n")
+            prefix = root / "home/Library/Caches/com.apple.python"
+            env = {**os.environ, **home_env(root / "home")}
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env.pop("PYTHONPYCACHEPREFIX", None)
+            for chosen_prefix in (None, prefix):
+                before = written_bytecode(app, chosen_prefix)
+                script = "import sys; sys.pycache_prefix = " + repr(
+                    str(chosen_prefix) if chosen_prefix is not None else None) + "; import helper"
+                result = subprocess.run([sys.executable, "-c", script], env=env, cwd=app,
+                                        capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(written_bytecode(app, chosen_prefix) - before)
+            self.assertEqual(mirrored_cache_root(prefix, r"C:\Users\BG\router\hooks"),
+                             prefix / "Users/BG/router/hooks")
+            stdlib = prefix / "usr/lib/python3.9/site.cpython-39.pyc"
+            stdlib.parent.mkdir(parents=True, exist_ok=True)
+            stdlib.touch()
+            self.assertNotIn(stdlib, written_bytecode(root, prefix))
 
     def clean_env(self, root):
         env = {key: value for key, value in os.environ.items()
@@ -219,6 +305,8 @@ class BytecodeTests(unittest.TestCase):
             shutil.copytree(ROOT / "hooks/router", hooks, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             (hooks / "common.py").unlink()
             env = dict(self.clean_env(root), ROUTER_PYTHON=sys.executable)
+            prefix = interpreter_prefix(env, root)
+            before_bytecode = written_bytecode(hooks, prefix)
             event = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "probe",
                                 "prompt": "Implement the requested feature here", "tool_name": "Read",
                                 "tool_input": {"file_path": "source.py"}})
@@ -230,7 +318,8 @@ class BytecodeTests(unittest.TestCase):
                 expected = f"{name}.py: cannot load the router hooks from {script.resolve().parent}: ModuleNotFoundError\n"
                 self.assertEqual(result.stderr, expected, name)
                 self.assertEqual((result.returncode, result.stdout), (1, ""), name)
-            self.assertEqual(list(root.rglob("*.pyc")), [])
+            self.assertEqual(written_bytecode(hooks, prefix), before_bytecode)
+            self.assertEqual(before_bytecode, set())
 
 
 if __name__ == "__main__":

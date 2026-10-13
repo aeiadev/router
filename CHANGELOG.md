@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+Pairs with Harness 0.4.0.
+
+- Add an opt-in `operations/v1` brief and declared-tool preflight. Missing declared tools exit 3; unknown visibility stays unknown, while coordinator guidance preserves the selected native or custom agent configuration.
+- Add report-only resulting-state observation with independently supplied readback evidence; no mutation gate or live-host verification is implied.
+- Add an offline paired evaluator with replay validation, cumulative usage accounting, failed-attempt retention and conservative screening. These synthetic checks make no savings or adoption claim.
+
 ## 0.3.3
 
 Pairs with Harness 0.3.3.

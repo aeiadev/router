@@ -18,6 +18,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_LINE = ".".join((ROOT / "VERSION").read_text().strip().split(".")[:2])
 sys.path.insert(0, str(ROOT / "tests"))
 from _platform import BASH, home_env, posix, posix_modes, python_shim, shim  # noqa: E402
 # host, settings file, agents source in a checkout, role extension
@@ -230,7 +231,7 @@ class UpgradeCleanup(UpgradeBase):
 
 
 class SharedRoleSkew(UpgradeBase):
-    SKEW = "shared roles come from Harness 0.2.0 or earlier; upgrade it for the 0.3 roles\n"
+    SKEW = f"shared roles come from Harness 0.2.0 or earlier; upgrade it for the {RELEASE_LINE} roles\n"
 
     def roles(self, host):
         return [f"agents/{role}{'.md' if host == 'claude' else '.toml'}" for role in ROLES]
@@ -346,7 +347,7 @@ class SharedRoleDeadlock(UpgradeBase):
                 self.assertEqual(claimed[relative], {"sha256": hashlib.sha256(wanted).hexdigest()}, relative)
 
     def test_older_sibling_or_edited_role_keeps_the_notice(self):
-        old = "shared roles come from Harness 0.2.0 or earlier; upgrade it for the 0.3 roles\n"
+        old = f"shared roles come from Harness 0.2.0 or earlier; upgrade it for the {RELEASE_LINE} roles\n"
         result = self.install("--host", "both")
         self.assertEqual(result.stdout, self.installed({host: old for host, *_ in HOSTS}))
         for host, *_ in HOSTS:
@@ -359,9 +360,9 @@ class SharedRoleDeadlock(UpgradeBase):
             path.chmod(0o644)  # Harness 0.2 copied the read-only mode of its release tree.
             path.write_bytes(path.read_bytes() + b"\n# mine\n")
         result = self.install("--host", "both")
-        notice = "shared roles come from Harness 0.3.0; upgrade it for the 0.3 roles\n"
+        notice = f"shared roles come from Harness 0.3.0; upgrade it for the {RELEASE_LINE} roles\n"
         self.assertEqual(result.stdout, self.installed({host: notice for host, *_ in HOSTS}))
-        # Harness 0.3.0 is older than this checkout (0.3.1 pairs only with 0.3.1): every role it
+        # Harness 0.3.0 is older than this checkout; only exact versions pair. Every role it
         # claims keeps its bytes, the edited one included; none is lost or half written.
         checkout = tuple(int(part) for part in (ROOT / "VERSION").read_text().strip().split("."))
         self.assertLess((0, 3, 0), checkout)

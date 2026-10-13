@@ -367,7 +367,8 @@ class Prefixes(Scratch):
         for prefix in ("router", "harness", "shared-roles", "Router", "SHARED-ROLES", "Harness"):
             with self.subTest(prefix=prefix):
                 self.assertEqual(common.canonical_role(f"{prefix}:builder", self.routes), "builder")
-                self.assertEqual(common.canonical_role(f" {prefix}:Explore ", self.routes), "researcher")
+                self.assertEqual(common.canonical_role(f" {prefix}:Explore ", self.routes), "Explore")
+                self.assertIsNone(common.classify(f"{prefix}:Explore", self.routes))
                 tier = common.classify(f"{prefix}:Builder-Std", self.routes)
                 self.assertEqual((tier["base"], tier["tier"], tier["class"]), ("builder", "std", "exec"))
                 self.assertEqual(common.classify(f"{prefix}:judge", self.routes)["base"], "judge")
@@ -381,7 +382,7 @@ class Prefixes(Scratch):
                 self.assertEqual(common.canonical_role(name, self.routes), name)
                 self.assertIsNone(common.classify(name, self.routes))
         result = common.decide_spawn({"subagent_type": "acme:builder", "prompt": BRIEF}, self.routes, self.modes, [])
-        self.assertEqual((result["rule"], result["class"]), ("inject-unlisted", None))
+        self.assertEqual((result["rule"], result["class"]), ("passthrough", None))
 
     def test_tier_only_in_enabled_plugin_is_emitted_with_the_prefix(self):
         self.enable("router")

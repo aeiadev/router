@@ -249,7 +249,7 @@ class JudgeReminderTests(LaneCase):
     Codex registers no Stop hook: Codex lanes stay running (no SubagentStop is registered there),
     so there is nothing to remind. That limit is checked in test_templates below.
     """
-    REASON = "returned without a judge: {}; spawn judge with the same TASK and FILES"
+    REASON = "Acceptance review pending for returned lanes: {}; give judge the same TASK, FILES and BAR. See router checklist."
 
     def remind(self, session=SESSION, active=None):
         event = {"hook_event_name": "Stop", "session_id": session, "cwd": str(self.project),
@@ -371,9 +371,9 @@ class LanesReportTests(LedgerLaneCase):
 
 
 class SessionNoteTests(LedgerLaneCase):
-    ACTIONS = {"returned": "Spawn judge with the same TASK and FILES before closing.",
+    ACTIONS = {"returned": "Request acceptance review with the same TASK, FILES and BAR. See router checklist.",
                "running": "Running lanes finish on their own; see `router lanes`.",
-               "judged": "All lanes judged."}
+               "judged": "Lane reviews recorded; acceptance still needs requirement evidence. See router checklist."}
 
     def note(self, source="compact", session=SESSION):
         event = {"hook_event_name": "SessionStart", "session_id": session, "source": source,
@@ -441,6 +441,16 @@ class SessionNoteTests(LedgerLaneCase):
         self.add_lane("lane six", now - 100, session="judged-session", status="judged", verdict="FAIL")
         self.assertEqual(self.context(self.note(session="judged-session")).splitlines()[1:],
                          ["builder-std lane six r1/3 judged FAIL", self.ACTIONS["judged"]])
+
+    def test_recorded_verdicts_do_not_claim_acceptance(self):
+        for index, verdict in enumerate(("PASS", "FAIL", "SEND_BACK", "UNKNOWN")):
+            session = f"review-{index}"
+            self.add_lane(f"lane-{index}", time.time() + index, status="judged", verdict=verdict,
+                          session=session)
+            note = self.context(self.note(session=session))
+            self.assertIn(f"judged {verdict}", note)
+            self.assertTrue(note.endswith(self.ACTIONS["judged"]))
+            self.assertNotIn("accepted", note.lower())
 
     def test_templates(self):
         self.assertIn(("compact", "session_note.py"), template_hooks("examples/settings.example.json").get("SessionStart", []))
@@ -599,7 +609,7 @@ class ReminderCapTests(JudgeReminderTests):
             self.returned(f"wide lane {index}", description=f"{index}" + "\u8a9e" * 59)
         reason = json.loads(self.remind().stdout)["reason"]
         self.assertLessEqual(len(reason.encode("utf-8")), 600)
-        self.assertRegex(reason, r"^returned without a judge: (.+, )?\+[1-5] more; spawn judge with the same TASK and FILES$")
+        self.assertRegex(reason, r"^Acceptance review pending for returned lanes: (.+, )?\+[1-5] more; give judge the same TASK, FILES and BAR\. See router checklist\.$")
 
     def test_two_lanes_print_the_old_text(self):
         self.returned("first lane", description="Lane alpha")

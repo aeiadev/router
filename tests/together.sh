@@ -925,6 +925,9 @@ def restore_case(name, order):
         check(any(lab in out["router"] for lab in labels), f"{case}: Router note names no lane: {out['router'][:200]}")
         check(not any(lab in out["harness"] for lab in labels) and not re.search(r"\b(PASS|SEND_BACK|verdict)\b", out["harness"]),
               f"{case}: Harness printed a lane or verdict")
+        check(not any(text.startswith("Inspection:") or text.startswith("Acceptance:") or
+                      text.startswith("External readback:") for value in out.values()
+                      for text in value.splitlines()), f"{case}: automatic restore printed the full checklist")
         check(not [line for line in state_lines if line.strip() in out["router"]] and "STATE.md" not in out["router"]
               and head[:7] not in out["router"], f"{case}: Router printed STATE.md text or git facts")
         duplicated = shared_lines(out["router"], out["harness"])
@@ -940,6 +943,87 @@ if not ONLY or "restore" in ONLY:
         for order in (("router", "harness"), ("harness", "router")):
             restore_case(name, order)
     print(f"PASS: restore caps, no shared lines ({tally['restore', 'claude']} claude, {tally['restore', 'codex']} codex cases)")
+
+
+def stop_matrix_case(order):
+    """Invoke both installed Stop entries independently for all completion reminder states."""
+    home = new_home()
+    env = pinned(home)
+    for tool in order:
+        install(tool, VERSION, home, "claude")
+    folder = home / ".claude"
+    cwd, _ = project(home, env)
+    config = json.loads((folder / "settings.json").read_text())
+    commands = [entry["command"] for block in config["hooks"]["Stop"] for entry in block["hooks"]]
+    check(len([command for command in commands if "judge_reminder.py" in command]) == 1 and
+          len([command for command in commands if "stop-check-verify-patch.sh" in command]) == 1,
+          f"{order}: expected independent Router and Harness Stop entries: {commands}")
+    context_command = hook_commands(folder, "claude", "context_guard.py")
+    context_command = next(command for event, _, command in context_command if event == "SubagentStop")
+    for inspection_pending, review_pending in ((True, False), (False, True), (True, True), (False, False)):
+        session = f"stop-{order[0]}-{int(inspection_pending)}-{int(review_pending)}"
+        brief = f"TASK update docs for {session}\nFILES README.md\nBAR true\nRETURN five lines"
+        spawn_command = hook_commands(folder, "claude", "spawn_guard.py")[0][2]
+        spawn = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": session,
+                 "cwd": str(cwd), "tool_input": {"subagent_type": "builder", "description": session,
+                 "prompt": brief}}
+        result = hook(spawn_command, env, spawn, cwd)
+        check(result.returncode == 0, f"{order}: spawn failed: {result.stderr[-250:]}")
+        def agent_return(role, message):
+            transcript = home / f"{session}-{role}.jsonl"
+            transcript.write_text("\n".join(json.dumps(line) for line in (
+                {"type": "user", "message": {"role": "user", "content": brief}},
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": message}]}}
+            )) + "\n")
+            event = {"hook_event_name": "SubagentStop", "session_id": session, "cwd": str(cwd),
+                     "agent_id": role, "agent_type": role, "agent_transcript_path": str(transcript),
+                     "last_assistant_message": message}
+            result = hook(context_command, env, event, cwd)
+            check(result.returncode == 0, f"{order} {role}: lane return failed: {result.stderr[-250:]}")
+        agent_return("builder-std", "CHANGED README.md")
+        if not review_pending:
+            agent_return("judge-std", "PASS: BAR evidence reviewed")
+        transcript = home / f"{session}-main.jsonl"
+        entries = [{"type": "user", "message": {"role": "user", "content": "finish"}}]
+        actions = [("edit", "Bash", {"command": "sed -i s/old/new/ notes.txt"})]
+        if not inspection_pending:
+            actions.append(("inspect", "Read", {"file_path": str(cwd / "notes.txt")}))
+        for identifier, name, data in actions:
+            entries.extend((
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": identifier,
+                    "name": name, "input": data}]}},
+                {"type": "user", "message": {"content": [{"type": "tool_result",
+                    "tool_use_id": identifier, "is_error": False}]}},
+            ))
+        transcript.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n")
+        event = {"hook_event_name": "Stop", "session_id": session, "cwd": str(cwd),
+                 "transcript_path": str(transcript), "stop_hook_active": False}
+        decisions = {}
+        for command in commands:
+            result = hook(command, env, event, cwd)
+            check(result.returncode == 0 and not result.stderr,
+                  f"{order}: Stop command failed: {command} {result.stderr[-250:]}")
+            if "judge_reminder.py" in command:
+                decisions["router"] = json.loads(result.stdout)["reason"] if result.stdout else ""
+            elif "stop-check-verify-patch.sh" in command:
+                decisions["harness"] = json.loads(result.stdout)["reason"] if result.stdout else ""
+        check(bool(decisions.get("router")) == review_pending and
+              bool(decisions.get("harness")) == inspection_pending,
+              f"{order} inspection={inspection_pending} review={review_pending}: {decisions}")
+        if review_pending:
+            check("Acceptance review pending" in decisions["router"] and
+                  "router checklist" in decisions["router"], f"{order}: wrong Router category")
+        if inspection_pending:
+            check("Inspection step" in decisions["harness"] and
+                  "README Completion checklist" in decisions["harness"], f"{order}: wrong Harness category")
+        tally["stop matrix"] += 1
+    remove_tree(home)
+
+
+if not ONLY or "stop_matrix" in ONLY:
+    for order in (("router", "harness"), ("harness", "router")):
+        stop_matrix_case(order)
+    print(f"PASS: independent installed Stop matrix ({tally['stop matrix']} states, both installation orders)")
 
 
 def pressure_file(home, session, base=None):

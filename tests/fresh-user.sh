@@ -88,8 +88,14 @@ def assert_routing(folder, environment):
     check(output["updatedInput"]["model"] == "sonnet", "builder did not select sonnet")
     for model in ("gpt-6-astra", "claude-opus-5-5"):
         for directive in ("", "\nroute: up novel"):
-            upper = dict(event, tool_input=dict(subagent_type="unlisted-role", model=model,
+            custom = dict(event, tool_input=dict(subagent_type="unlisted-role", model=model,
                                                prompt="Find the helper" + directive))
+            untouched = run([sys.executable, str(guard)], environment=environment,
+                            input_text=json.dumps(custom))
+            check(untouched.stdout == "" and untouched.stderr == "",
+                  "installed guard changed an unlisted agent")
+            upper = dict(event, tool_input=dict(subagent_type="sweeper", model=model,
+                                               prompt="TASK Find the helper\nRETURN file paths" + directive))
             result = run([sys.executable, str(guard)], environment=environment,
                          input_text=json.dumps(upper), expected=0 if directive else 2)
             if not directive:

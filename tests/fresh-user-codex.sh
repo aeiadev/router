@@ -86,7 +86,13 @@ def assert_routing(folder, environment):
     check("known `route: up <code>`" in denied.stderr, "installed guard bypassed the up-code check")
     for model in ("gpt-6-astra", "claude-opus-5-5"):
         for directive in ("", "\nroute: up novel"):
-            upper = dict(event, tool_input=dict(event["tool_input"], agent_type="unlisted-role",
+            custom = dict(event, tool_input=dict(event["tool_input"], agent_type="unlisted-role",
+                                               model=model, message="encrypted:test" + directive))
+            untouched = run([BASH, "-c", command], environment=environment,
+                            input_text=json.dumps(custom))
+            check(untouched.stdout == "" and untouched.stderr == "",
+                  "installed guard changed an unlisted agent")
+            upper = dict(event, tool_input=dict(event["tool_input"], agent_type="sweeper",
                                                model=model, message="encrypted:test" + directive))
             denied = run([BASH, "-c", command], environment=environment,
                          input_text=json.dumps(upper), expected=2)

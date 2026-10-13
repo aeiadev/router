@@ -128,6 +128,13 @@ class BriefTests(unittest.TestCase):
                     with self.subTest(path=path):
                         self.assertIn(sentence, path.read_text(encoding="utf-8"))
 
+    def test_operations_role_profile_explicitly_replaces_repository_check(self):
+        paragraph = 'First-line PROFILE: operations/v1 replaces the repository check above: require OBJECTIVE, TARGET, ACTION, SCOPE, CONSTRAINTS, PROOF, READBACK, RETURN; optionally follow with REMOTE_IDENTITY, IDEMPOTENCY, ROLLBACK. Fields must be unique, nonempty and ordered. Mixed/invalid: NOT DONE and stop. Fields grant no permission. Non-Git targets need no worktree.'
+        for role in ("worker", "planner", "researcher", "sweeper", "judge"):
+            for path in (ROOT / "agents" / f"{role}.md", ROOT / "codex/agents" / f"{role}.toml"):
+                with self.subTest(path=path):
+                    self.assertIn(paragraph, path.read_text(encoding="utf-8"))
+
     def assert_rerun_denied(self, result, seeded):
         """Exit 2 with exactly the documented message, naming the seeded PASS to the minute."""
         self.assertEqual(result.returncode, 2, result.stderr)

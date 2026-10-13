@@ -97,6 +97,26 @@ class CodexSpawnTests(unittest.TestCase):
                 with self.subTest(tool=tool, role=role):
                     self.assert_allowed(self.hook(self.spawn(role, task=role + tool), tool=tool))
 
+    def test_custom_passthrough_preserves_identity_and_attempts(self):
+        routes = json.loads(ROUTES.read_text(encoding="utf-8"))
+        routes["router"]["never"] = ["opus"]
+        routes["aliases"].update({"Explore": "researcher", "Plan": "planner",
+                                  "general-purpose": "worker"})  # legacy owner table
+        path = self.root / "passthrough-routes.json"
+        for mode in ("off", "shadow", "enforce"):
+            routes["router"]["modes"] = dict.fromkeys(routes["router"]["modes"], mode)
+            path.write_text(json.dumps(routes), encoding="utf-8")
+            for role in ("custom-helper", "Explore", "Plan", "general-purpose"):
+                for model in (None, "inherit", "sonnet", "opus", "gpt-6-astra"):
+                    with self.subTest(mode=mode, role=role, model=model):
+                        request = self.spawn(role, task="same-task")
+                        if model is not None:
+                            request["model"] = model
+                        self.assert_silent(self.hook(request, extra={"ROUTES_JSON": str(path)}))
+                        record = json.loads((self.state / "spawns.jsonl").read_text().splitlines()[-1])
+                        self.assertEqual((record["asked_type"], record["run_type"], record["rule"], record["round"]),
+                                         (role, role, "passthrough", None))
+
     def test_non_exec_upper_roles_require_up_code_on_both_hosts(self):
         for role in ("worker-up", "sweeper-up", "researcher-up", "planner-up"):
             with self.subTest(role=role):
@@ -124,8 +144,8 @@ class CodexSpawnTests(unittest.TestCase):
                                 request = self.spawn(role, model=model)
                                 request["message"] += directive
                                 result = self.hook(request)
-                            # A code inside an encrypted message is never visible.
-                            if host == "claude" and directive == "\nroute: up novel":
+                            # Custom agents pass through; encrypted Codex text cannot supply a code.
+                            if role == "unlisted-role" or (host == "claude" and directive == "\nroute: up novel"):
                                 self.assertEqual((result.returncode, result.stderr), (0, ""))
                             else:
                                 self.assert_denied(result, "known `route: up <code>`")
@@ -143,15 +163,18 @@ class CodexSpawnTests(unittest.TestCase):
                 for host in ("claude", "codex"):
                     with self.subTest(mode=mode, model=model, host=host):
                         if host == "claude":
-                            request = dict(subagent_type="unlisted-role", model=model,
-                                           prompt="Find the helper")
+                            request = dict(subagent_type="sweeper", model=model,
+                                           prompt="TASK Find the helper\nRETURN file paths")
                             result = self.hook(request, tool="Agent", guard=CLAUDE_GUARD,
                                                extra={"ROUTES_JSON": str(routes_path)})
                         else:
-                            result = self.hook(self.spawn("unlisted-role", model=model),
+                            result = self.hook(self.spawn("sweeper", model=model),
                                                extra={"ROUTES_JSON": str(routes_path)})
                         if mode == "enforce" and model in ("custom-upper-model", "sonnet"):
                             self.assert_denied(result, "known `route: up <code>`")
+                        elif host == "claude":
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], "allow")
                         else:
                             self.assert_silent(result)
 

@@ -1,0 +1,10 @@
+# Optional Router-only Codex judge profile. Merge these tables into the session
+# config before starting a dedicated verification session. Do not set a default.
+[permissions.harness-judge.filesystem]
+":root" = "read"
+":tmpdir" = "write"
+":slash_tmp" = "write"
+":workspace_roots" = "read"
+
+[permissions.harness-judge.network]
+enabled = false
