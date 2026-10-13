@@ -1,142 +1,100 @@
-name: CI
-on:
+name: Mac temporary-root diagnostic
+'on':
   push:
-  pull_request:
+    branches:
+    - ci/macos-temp-diagnostic-040
+permissions:
+  contents: read
 defaults:
   run:
     shell: bash
 env:
-  HARNESS_REPOSITORY: ${{ vars.HARNESS_REPOSITORY || 'aeiadev/harness' }}
-  HARNESS_PINNED_REF: ${{ vars.HARNESS_REF }}
+  HARNESS_REPOSITORY: aeiadev/harness
+  HARNESS_PINNED_REF: 13f151ebe601cda7ea24033fbf6f93eaa9bdbae2
 jobs:
-  test:
-    runs-on: ${{ matrix.os }}
+  diagnostic:
+    runs-on: macos-latest
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.13"]
+        python-version:
+        - '3.9'
+        - '3.13'
+    env:
+      EXPECTED_PYTHON: ${{ matrix.python-version }}
     steps:
-      - name: Keep checkouts LF
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ env.HARNESS_REPOSITORY }}
-          ref: ${{ env.HARNESS_PINNED_REF }}
-          path: harness
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Old release trees
-        run: |
-          set -euo pipefail
-          base=$RUNNER_TEMP/old-trees
-          if command -v cygpath >/dev/null 2>&1; then base=$(cygpath -m "$base"); fi
-          old_tree() {
-            mkdir -p "$base/$2"
-            archive="$base/$2.tar"
-            git -C "$1" archive --format=tar --output="$archive" "$3"
-            tar -xf - -C "$base/$2" < "$archive"
-            rm "$archive"
-            echo "$4=$base/$2" >> "$GITHUB_ENV"
-          }
-          old_tree . router-0.1 36acbafd839886fdff9d7ba7a416d6a8fad13ec5 ROUTER_V01
-          old_tree . router-0.2 421454545008e0c361def01049989df5b9056b83 ROUTER_V02
-          old_tree harness harness-0.1 063388b95632e935d53ba5ae058659b51960308d HARNESS_V01
-          old_tree harness harness-0.2 3b80d6fbaa3d15970e6f0e1409d141b952f0b7f2 HARNESS_V02
-      - name: Tests
-        run: python tests/run_all.py
-      - name: Shared pins
-        if: ${{ !cancelled() }}
-        run: |
-          cd agents
-          if command -v sha256sum >/dev/null 2>&1; then sha256sum -c SHARED.sha256; else shasum -a 256 -c SHARED.sha256; fi
-      - name: Generated roles
-        if: ${{ !cancelled() }}
-        run: python scripts/generate_roles.py --check
-      - name: Plugin drift
-        if: ${{ !cancelled() }}
-        run: python scripts/gen_plugin.py --check
-      - name: Plugin validate
-        if: ${{ !cancelled() }}
-        run: |
-          if command -v claude >/dev/null; then claude plugin validate .; claude plugin validate plugins/router; claude plugin validate plugins/shared-roles; fi
-  together:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.13"]
-        harness-ref: [resolved, latest-tag]
-    steps:
-      - name: Keep checkouts LF
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ env.HARNESS_REPOSITORY }}
-          path: harness
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Old release trees
-        run: |
-          set -euo pipefail
-          base=$RUNNER_TEMP/old-trees
-          if command -v cygpath >/dev/null 2>&1; then base=$(cygpath -m "$base"); fi
-          old_tree() {
-            mkdir -p "$base/$2"
-            archive="$base/$2.tar"
-            git -C "$1" archive --format=tar --output="$archive" "$3"
-            tar -xf - -C "$base/$2" < "$archive"
-            rm "$archive"
-            echo "$4=$base/$2" >> "$GITHUB_ENV"
-          }
-          old_tree . router-0.1 36acbafd839886fdff9d7ba7a416d6a8fad13ec5 ROUTER_V01
-          old_tree . router-0.2 421454545008e0c361def01049989df5b9056b83 ROUTER_V02
-          old_tree harness harness-0.1 063388b95632e935d53ba5ae058659b51960308d HARNESS_V01
-          old_tree harness harness-0.2 3b80d6fbaa3d15970e6f0e1409d141b952f0b7f2 HARNESS_V02
-      - name: Harness ref
-        env:
-          MODE: ${{ matrix.harness-ref }}
-        run: |
-          set -euo pipefail
-          if [ "$MODE" = latest-tag ]; then
-            ref=$(bash scripts/harness-ref.sh latest harness VERSION)
-            if [ -z "$ref" ]; then echo "notice: no Harness release tag for $(cat VERSION) yet"; exit 0; fi
-          else
-            ref=$(bash scripts/harness-ref.sh resolve harness VERSION "$HARNESS_PINNED_REF")
-          fi
-          git -C harness checkout -q --detach "$ref"
-          echo "HARNESS_REF=$ref" >> "$GITHUB_ENV"
-      - name: Together
-        if: env.HARNESS_REF != ''
-        run: HARNESS_DIR=$PWD/harness bash tests/together.sh
-  shared-drift:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ env.HARNESS_REPOSITORY }}
-          path: harness
-          fetch-depth: 0
-      - name: Harness ref
-        run: |
-          set -euo pipefail
-          ref=$(bash scripts/harness-ref.sh resolve harness VERSION "$HARNESS_PINNED_REF")
-          git -C harness checkout -q --detach "$ref"
-      - run: cmp agents/SHARED.sha256 harness/agents/SHARED.sha256
-  secrets:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.18.4 detect --source . --no-banner
+    - name: Exact published Router
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ee9a4a9e16f1e19491940db2e2da2ae8291ab765
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Exact published Harness
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        repository: aeiadev/harness
+        ref: 13f151ebe601cda7ea24033fbf6f93eaa9bdbae2
+        path: harness
+        fetch-depth: 0
+        persist-credentials: false
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Old release trees
+      run: |
+        set -euo pipefail
+        base=$RUNNER_TEMP/old-trees
+        if command -v cygpath >/dev/null 2>&1; then base=$(cygpath -m "$base"); fi
+        old_tree() {
+          mkdir -p "$base/$2"
+          archive="$base/$2.tar"
+          git -C "$1" archive --format=tar --output="$archive" "$3"
+          tar -xf - -C "$base/$2" < "$archive"
+          rm "$archive"
+          echo "$4=$base/$2" >> "$GITHUB_ENV"
+        }
+        old_tree . router-0.1 36acbafd839886fdff9d7ba7a416d6a8fad13ec5 ROUTER_V01
+        old_tree . router-0.2 421454545008e0c361def01049989df5b9056b83 ROUTER_V02
+        old_tree harness harness-0.1 063388b95632e935d53ba5ae058659b51960308d HARNESS_V01
+        old_tree harness harness-0.2 3b80d6fbaa3d15970e6f0e1409d141b952f0b7f2 HARNESS_V02
+    - name: Observe temp ancestry and original receipt tests
+      run: |-
+        python - <<'PYCODE'
+        import json, os, pathlib, platform, stat, subprocess, sys, tempfile
+        root = pathlib.Path(tempfile.gettempdir())
+        rows = []
+        for path in [root, *root.parents]:
+            mode = path.lstat().st_mode
+            rows.append({'path': str(path), 'kind': 'symlink' if stat.S_ISLNK(mode) else 'directory' if stat.S_ISDIR(mode) else 'other'})
+        assert platform.system() == 'Darwin'
+        assert '.'.join(map(str, sys.version_info[:2])) == os.environ['EXPECTED_PYTHON']
+        assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == 'ee9a4a9e16f1e19491940db2e2da2ae8291ab765'
+        result = subprocess.run([sys.executable, 'tests/test_receipts.py'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+        print(result.stdout, end='')
+        print(result.stderr, end='')
+        unsafe = (result.stdout + result.stderr).count('unsafe receipt storage')
+        report = {'python': platform.python_version(), 'platform': platform.system(), 'temporary_root': str(root), 'ancestors': rows, 'raw_test_exit': result.returncode, 'unsafe_receipt_storage_mentions': unsafe}
+        print('AEIA_TEMP_DIAGNOSTIC ' + json.dumps(report, sort_keys=True))
+        if any(row['kind'] == 'symlink' for row in rows):
+            assert result.returncode != 0 and unsafe > 0, 'symlink hypothesis not reproduced'
+        else:
+            assert result.returncode == 0, 'failure without symlink ancestor needs another diagnosis'
+        canonical = str(root.resolve(strict=True))
+        assert pathlib.Path(canonical).is_dir() and not any(c in canonical for c in '\r\n')
+        with open(os.environ['GITHUB_ENV'], 'a') as stream:
+            for key in ('TMPDIR', 'TMP', 'TEMP'):
+                stream.write(key + '=' + canonical + '\n')
+        print('AEIA_CANONICAL_TEMP ' + canonical)
+        PYCODE
+    - name: Original full suite with canonical temporary root
+      run: |-
+        set -euo pipefail
+        python - <<'PYCODE'
+        import os, pathlib, tempfile
+        root = pathlib.Path(tempfile.gettempdir())
+        assert str(root) == str(root.resolve(strict=True))
+        assert all(os.environ[k] == str(root) for k in ('TMPDIR','TMP','TEMP'))
+        print('AEIA_CANONICAL_TEMP_CONFIRMED ' + str(root))
+        PYCODE
+        python tests/run_all.py
