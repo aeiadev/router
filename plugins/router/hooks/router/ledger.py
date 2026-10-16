@@ -8,9 +8,10 @@ migrated or deleted: hooks of a 0.2 install on the same host keep using it.
 Privacy: rows hold hashes, role and tier names, times, counts and a short scrubbed label. Never
 prompt, BAR, RETURN or finding text.
 
-Failures: hook-facing calls never raise on a sqlite or parse error. They log one line with the
-ledger path to errors.jsonl and return a safe default (None, False or an empty list), so the hook
-allows the call. Calls made for the router CLI (ladders, reset_ladder) raise, so the CLI can say why.
+Failures: hook-facing calls log one line with the ledger path to errors.jsonl. Spawn accounting
+returns a structured outcome so an already-computed block survives a failed commit and unavailable
+history cannot be mistaken for an empty history. Other hook calls return safe defaults. Calls made
+for the router CLI (ladders, reset_ladder) raise, so the CLI can say why.
 """
 import contextlib
 import hashlib
@@ -404,27 +405,35 @@ def _lane_start(conn, session, brief, now) -> float:
 
 
 def record_attempt_and_lane(key, choose, *, role, project=None, session=None, brief=None, label=None,
-                            ttl_hours=12, now=None, path=None):
+                            ttl_hours=12, now=None, path=None, structured=False):
     """Decide under one write lock; an accepted spawn adds its attempt and a running lane together.
 
     choose(prior) receives the attempts for key newer than ttl_hours and returns the decision
-    dict. A block writes nothing. Returns the decision, or None after a logged ledger failure;
-    the caller then allows the call unchanged.
+    dict. A block writes nothing. With structured=True, returns decision, history and commit
+    status, and the failure stage. Legacy callers receive the decision or None on failure.
     """
     now = time.time() if now is None else float(now)
     path = Path(path) if path is not None else ledger_path()
+    outcome = {"decision": None, "history_available": False,
+               "accounting_committed": False, "failure_stage": None}
     try:
         conn = connect(path, timeout=HOOK_BUSY_SECONDS, hook=True)
     except FAILURES as exc:
         _failed(path, exc, "connect")
-        return None
+        outcome["failure_stage"] = "connect"
+        return outcome if structured else None
     deciding = False
+    stage = "read"
     try:
         conn.execute("BEGIN IMMEDIATE")
         prior = load_prior(conn, key, now, ttl_hours)
+        outcome["history_available"] = True
+        stage = "decide"
         deciding = True
         result = choose(prior)
+        outcome["decision"] = result
         deciding = False
+        stage = "commit"
         if result.get("decision") != "block":
             _expire(conn, key, now - ttl_hours * 3600)
             tier = result.get("tier")
@@ -433,13 +442,15 @@ def record_attempt_and_lane(key, choose, *, role, project=None, session=None, br
             conn.execute("INSERT INTO lanes VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, NULL)",
                          (session, brief, key, project, role, tier, label, _lane_start(conn, session, brief, now)))
         conn.execute("COMMIT")
+        outcome["accounting_committed"] = True
     except FAILURES as exc:
         _rollback(conn)
         conn.close()
-        if deciding:
+        if deciding and not structured:
             raise
-        _failed(path, exc, "record")
-        return None
+        _failed(path, exc, stage)
+        outcome["failure_stage"] = stage
+        return outcome if structured else None
     except BaseException:
         _rollback(conn)
         conn.close()
@@ -451,7 +462,7 @@ def record_attempt_and_lane(key, choose, *, role, project=None, session=None, br
         _failed(path, exc, "prune")
     finally:
         conn.close()
-    return result
+    return outcome if structured else result
 
 
 def mark_lane(session, brief, status, *, now=None, path=None):

@@ -273,7 +273,7 @@ class DocsTests(unittest.TestCase):
     def test_changelog_031_groups_pairing_and_limits(self):
         text = CHANGELOG.read_text()
         version = (ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "0.4.1")
+        self.assertEqual(version, "0.5.0")
         section = text.split("## 0.3.1\n", 1)[1].split("\n## 0.3.0\n", 1)[0]
         self.assertEqual(section.strip().split("\n\n", 1)[0], PAIRING_LINE)
         self.assertEqual(re.findall(r"(?m)^### (.+)$", section), ["Fixed", "Platforms", "Changed"])
@@ -307,6 +307,61 @@ class DocsTests(unittest.TestCase):
         for phrase in ("spool", "project root", "bytecode", "checkout", "no-change", "Leave settings untouched"):
             self.assertIn(phrase, part)
         self.assertNotIn(chr(0x2014), text)
+
+
+RELEASE = ROOT / "docs/releases/0.5.0.md"
+
+
+class Release050(unittest.TestCase):
+    """0.5.0 text names only accepted scope and states what was not run."""
+
+    def setUp(self):
+        self.notes = RELEASE.read_text(encoding="utf-8")
+        self.changelog = CHANGELOG.read_text(encoding="utf-8").split("\n## 0.4.1\n", 1)[0]
+        self.readme = README.read_text(encoding="utf-8")
+
+    def test_changelog_section_pairs_and_stays_bounded(self):
+        self.assertTrue(self.changelog.startswith("# Changelog\n\n## 0.5.0\n\nPairs with Harness 0.5.0.\n"))
+        self.assertTrue(all(len(line) <= 400 for line in self.changelog.splitlines()))
+        bullets = re.findall(r"(?m)^- .*$", self.changelog)
+        self.assertEqual(len(bullets), len(set(bullets)))
+
+    def test_every_text_states_the_unrun_gates(self):
+        for name, text in (("changelog", self.changelog), ("notes", self.notes)):
+            flat = " ".join(text.split())
+            for phrase in ("(six cells)", "0 failures and every skip named and reviewed", "Windows skips the POSIX-only tests", "required SSH integration test ran on Linux only", "The PyYAML parity tests ran on Linux with Python 3.9 and 3.13 with PyYAML installed", "live-host", "installed-runtime", "paid-pilot", "have not been run"):
+                self.assertIn(phrase.lower(), flat.lower(), name + ": " + phrase)
+            self.assertNotIn("not tagged or published", flat, name)
+            self.assertNotIn("source candidate", flat.lower(), name)
+            self.assertIn("ran natively on Linux, macOS and Windows with Python 3.9 and 3.13", flat, name)
+            self.assertNotIn("not yet run", flat.lower(), name)
+
+    def test_release_texts_cite_no_commit_ids(self):
+        # Pre-publication commits never become public. The changelog section is the release-notes.sh
+        # body. A 7 to 40 digit hex token (all-digit too) fails; the 64-digit catalog digest is longer.
+        for name, text in (("changelog", self.changelog), ("notes", self.notes)):
+            self.assertEqual(re.findall(r"\b[0-9a-f]{7,40}\b", text), [], name)
+        self.assertIn("bytes/4", self.notes)
+        self.assertIn("3a2c4a3b3f1f926aade80d07cf041e614d67923bce51b3e9341122a327a9bfd9", self.notes)
+
+    def test_no_forward_looking_website_or_billing_claims(self):
+        for name, text in (("changelog", self.changelog), ("notes", self.notes), ("readme", self.readme)):
+            lowered = text.lower()
+            for phrase in ("coming next", "coming soon", "roadmap", "will be added", "website"):
+                self.assertNotIn(phrase, lowered, name + ": " + phrase)
+            self.assertNotIn("\u2014", text, name)
+        self.assertNotIn("blob/v0.5.0", self.readme)
+
+    def test_readme_labels_published_release_and_context_cost(self):
+        flat = " ".join(self.readme.split())
+        self.assertIn("Use the [Router 0.5.0 release](https://github.com/aeiadev/router/releases/tag/v0.5.0) for this version.", flat)
+        self.assertNotIn("releases/tag/v0.4.1", self.readme)
+        self.assertNotIn("source candidate", flat)
+        self.assertIn("docs/releases/0.5.0.md", self.readme)
+        self.assertIn("bytes/4 is an estimate, not measured billing or savings", flat)
+        self.assertIn("Receipt file input is bounded", flat)
+        self.assertIn("not independent host proof", flat)
+        self.assertIn("still block when the ledger is unavailable", flat)
 
 
 if __name__ == "__main__":

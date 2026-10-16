@@ -6,8 +6,12 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import sys
 
-import common
+if "_router_commands_receipt_context" in sys.modules:
+    common = sys.modules["_router_commands_receipt_context"]
+else:
+    import common
 
 
 compat = common.compat

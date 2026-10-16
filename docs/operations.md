@@ -35,7 +35,7 @@ Tool names must be exact. Set `available_tools` to `null` when visibility is
 unknown; an empty list means none are declared. A wildcard does not establish
 read-only authority or tool visibility.
 
-From the 0.4.1 checkout, run this complete synthetic preflight. It
+From a 0.4.1 or later checkout, run this complete synthetic preflight. It
 requests the custom agent `fixture-worker` unchanged and deliberately lacks a
 declared tool, so the command exits 3 without dispatching anything.
 
@@ -102,3 +102,16 @@ raw page contents, credentials, URLs or private paths into receipts.
 The shipped tests use an isolated fake service with separate worker and observer
 channels. They prove fixture write denial, not live SSH/MCP safety or host trust.
 The tools do not inspect arbitrary remote shell commands or connector mutations.
+
+## Paired workflow evidence
+
+`tests/test_operations_ssh.py` runs the workflow against the Harness disposable
+OpenSSH fixture: preflight, the Harness guard, an upload and rename that reach the
+container, a prohibited removal denied before dispatch, and observer readback of the
+actual bytes. Run it with `HARNESS_DIR=/absolute/harness python3 -B tests/test_operations_ssh.py`.
+It skips with an "unrun" message unless `SSH_FIXTURE_REQUIRED=1` (or
+`SSH_FIXTURE_RUN=1`) is set; with `SSH_FIXTURE_REQUIRED=1` a missing checkout,
+engine or image fails. It covers synthetic content on loopback only, not an
+installed host, a live connector or a model. See `docs/host-validation.md` for the
+three evidence classes and the on-demand host checklist. The brief stays
+`operations/v1`.

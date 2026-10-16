@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 from pathlib import Path
+import py_compile
 import shlex
 import shutil
 import statistics
@@ -14,6 +15,7 @@ import tempfile
 import time
 import types
 import unittest
+import zipfile
 
 from _platform import BASH
 
@@ -510,6 +512,187 @@ print(json.dumps([normalize(sys.argv[1]), normalize(str(selected / 'python'))]))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(list(self.home.rglob("*")), [], "a read-only command created files")
 
+    @unittest.skipIf(WINDOWS, "Git Bash emulates exec with a child process")
+    def test_python_replaces_the_launcher_on_every_run(self):
+        # Hooks rely on exec: python takes over the launcher's process, so signals and
+        # timeouts aimed at a hook reach python, on the run that saves the cache too.
+        self.real_python("python3")
+        self.cache().parent.mkdir(parents=True)
+        (self.dir / "pids.py").write_text("import os\nprint(os.getpid(), os.getppid())\n", encoding="utf-8")
+        for run in ("saves the cache", "reads the cache"):
+            with self.subTest(run=run):
+                launcher = subprocess.Popen([SH, str(self.dir / "pyrun.sh"), TOOL, "warn", "pids.py"],
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            text=True, env=self.env([self.bin, Path(SH).parent]))
+                out, err = launcher.communicate(timeout=60)
+                self.assertEqual(launcher.returncode, 0, err)
+                self.assertEqual(out.split(), [str(launcher.pid), str(os.getpid())], "python is not the launcher's process")
+                self.assertTrue(self.cache().is_file())
+
+    def cold_and_warm(self, *args):
+        """The same command on a cold run (probe, state folder, no cache) and with the interpreter set."""
+        self.real_python("python3")
+        self.cache().parent.mkdir(parents=True, exist_ok=True)
+        cold = self.run_launcher(TOOL, "warn", *args, path=[self.bin, Path(SH).parent])
+        warm = self.run_launcher(TOOL, "warn", *args, **{VARIABLE: sys.executable})
+        return cold, warm
+
+    def test_a_rejected_cold_run_saves_no_cache(self):
+        for body, code in (("import sys\nsys.exit(1)\n", 1), ("import sys\nsys.exit(2)\n", 2),
+                           ("def fail():\n    raise RuntimeError('rejected')\nfail()\n", 1),
+                           ("import sys\nsys.exit('rejected: a message')\n", 1), ("def (\n", 1),
+                           ("def stop():\n    raise KeyboardInterrupt\nstop()\n", None)):
+            with self.subTest(body=body):
+                (self.dir / "reject.py").write_text(body, encoding="utf-8")
+                cold, warm = self.cold_and_warm("reject.py", "a b")
+                self.assertEqual(cold.returncode, warm.returncode)
+                self.assertNotEqual(warm.returncode, 0)
+                if code is not None:
+                    self.assertEqual(warm.returncode, code)
+                if code is not None or sys.version_info >= (3, 11):  # 3.9 and 3.10 re-raise with boot frames
+                    self.assertEqual(cold.stderr, warm.stderr)
+                self.assertFalse(self.cache().exists(), "a run that exits nonzero saved the cache")
+                self.assertEqual(list(self.cache().parent.iterdir()), [])
+
+    def test_a_cold_run_names_its_script_as_python_does(self):
+        # On Windows, Python 3.11+ keeps a C:\ or \\server script path as given (C:\x/y.py, C:\x\..\y.py)
+        # in __file__ and tracebacks, but expands C:/x/y.py; 3.9 and 3.10 expand every spelling.
+        (self.dir / "sub").mkdir()
+        (self.dir / "named.py").write_text("print(__file__)\nraise RuntimeError('named')\n", encoding="utf-8")
+        for script in ("named.py", posix(self.dir / "named.py"), os.sep.join((str(self.dir / "sub"), "..", "named.py"))):
+            with self.subTest(script=script):
+                cold, warm = self.cold_and_warm(script)
+                self.assertEqual((cold.returncode, cold.stdout, cold.stderr), (warm.returncode, warm.stdout, warm.stderr))
+                self.assertEqual(cold.returncode, 1)
+                self.assertEqual(list(self.cache().parent.iterdir()), [])
+
+    def test_a_missing_script_saves_no_cache(self):
+        self.real_python("python3")
+        self.cache().parent.mkdir(parents=True)
+        result = self.run_launcher(TOOL, "warn", path=[self.bin, Path(SH).parent])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing script", result.stderr)
+        self.assertEqual(list(self.cache().parent.iterdir()), [])
+        unreadable = self.dir / "unreadable.py"
+        unreadable.write_text("print('ran')\n", encoding="utf-8")
+        unreadable.chmod(0)
+        self.addCleanup(unreadable.chmod, 0o600)
+        cases = ["absent.py"] + (["unreadable.py"] if not WINDOWS and os.geteuid() != 0 else [])
+        for name in cases:
+            with self.subTest(script=name):
+                cold, warm = self.cold_and_warm(name)  # Python's own error, on a cold run too
+                self.assertEqual((cold.returncode, cold.stderr), (warm.returncode, warm.stderr))
+                self.assertNotEqual(cold.returncode, 0)
+                self.assertEqual(list(self.cache().parent.iterdir()), [])
+
+    @unittest.skipIf(WINDOWS, "a closed pipe reader is a POSIX EPIPE case")
+    def test_a_run_whose_exit_flush_fails_saves_no_cache(self):
+        # Python exits 120 when flushing stdout at exit fails; that run is not a success.
+        (self.dir / "quiet.py").write_text("print('buffered until exit')\n", encoding="utf-8")
+        self.real_python("python3")
+        self.cache().parent.mkdir(parents=True)
+        codes = []
+        for extra in ({}, {VARIABLE: sys.executable}):
+            reader, writer = os.pipe()
+            os.close(reader)
+            try:
+                result = subprocess.run([SH, str(self.dir / "pyrun.sh"), TOOL, "warn", "quiet.py"],
+                                        stdin=subprocess.DEVNULL, stdout=writer, stderr=subprocess.PIPE, timeout=60,
+                                        env=self.env([self.bin, Path(SH).parent], **extra))
+            finally:
+                os.close(writer)
+            codes.append(result.returncode)
+            self.assertEqual(list(self.cache().parent.iterdir()), [], "a run that exited 120 saved the cache")
+        self.assertEqual(codes, [120, 120])
+
+    def test_a_successful_cold_run_saves_the_cache_privately(self):
+        self.real_python("python3")
+        self.cache().parent.mkdir(parents=True)
+        result = self.run_launcher(TOOL, "warn", "probe.py", path=[self.bin, Path(SH).parent])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = self.cache().read_bytes()
+        self.assertTrue(saved.endswith(b"\n") and b"\r" not in saved and saved.count(b"\n") == 1, saved)
+        self.assertEqual(os.path.realpath(os.fsdecode(saved[:-1])), os.path.realpath(sys.executable))
+        if not WINDOWS:
+            self.assertEqual(self.cache().stat().st_mode & 0o777, 0o600)
+        self.assertEqual([path.name for path in self.cache().parent.iterdir()], ["python"], "a temporary file is left")
+        again = self.run_launcher(TOOL, "warn", "probe.py", "z", path=[self.empty])
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout)["argv"], ["z"])
+
+    def test_cold_and_warm_runs_see_the_same_script_environment(self):
+        (self.dir / "sibling_module.py").write_text("VALUE = 'beside'\n", encoding="utf-8")
+        (self.dir / "seen.py").write_text(
+            "import json, os, sys\nimport sibling_module\n"
+            "print(json.dumps({'name': __name__, 'file': __file__, 'argv0': sys.argv[0],\n"
+            "                  'argv': sys.argv[1:], 'path0': os.path.realpath(sys.path[0]),\n"
+            "                  'sibling': [sibling_module.VALUE, os.path.realpath(sibling_module.__file__)]}))\n",
+            encoding="utf-8")
+        self.real_python("python3")
+        self.cache().parent.mkdir(parents=True)
+        seen = []
+        for run in ("cold", "warm"):
+            with self.subTest(run=run):
+                self.assertEqual(self.cache().exists(), run == "warm")
+                # A relative launcher path gives a relative script path, which argv[0] keeps as given.
+                result = subprocess.run([SH, "./pyrun.sh", TOOL, "warn", "seen.py", "a b", "-c"], stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, cwd=self.dir, timeout=60,
+                                        env=self.env([self.bin, Path(SH).parent]))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                seen.append(json.loads(result.stdout))
+        self.assertEqual(seen[0], seen[1])
+        self.assertEqual(seen[0]["argv0"], "./seen.py")
+        self.assertEqual(seen[0]["name"], "__main__")
+        self.assertEqual(seen[0]["argv"], ["a b", "-c"])
+        self.assertEqual(seen[0]["path0"], os.path.realpath(self.dir))
+
+    @unittest.skipIf(WINDOWS, "Windows cannot remove a process's current folder")
+    def test_a_cold_run_from_a_removed_folder_matches_a_warm_run(self):
+        # An absolute script path needs no current folder: a plain run works from a removed one,
+        # so the cold run that saves the cache must work there too.
+        self.real_python("python3")
+        self.cache().parent.mkdir(parents=True)
+        gone = self.tmp / "gone"
+        runs = []
+        for run, extra in (("cold", {}), ("warm", {VARIABLE: sys.executable})):
+            with self.subTest(run=run):
+                gone.mkdir()
+                result = subprocess.run([SH, "-c", 'cd "$1" && rmdir "$1" && shift && exec "$@"', "sh", str(gone),
+                                         SH, str(self.dir / "pyrun.sh"), TOOL, "warn", "probe.py", "z"],
+                                        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+                                        env=self.env([self.bin, Path(SH).parent], **extra))
+                self.assertFalse(gone.exists())
+                runs.append((result.returncode, result.stdout, result.stderr))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["argv"], ["z"])
+                self.assertTrue(self.cache().is_file(), "the cold run saved no cache")
+        self.assertEqual(runs[0], runs[1])
+
+    def test_a_cold_run_of_an_extensionless_script_saves_the_cache(self):
+        # A CLI with no extension (Router's bin/router) saves the cache on its first successful run, as a hook does.
+        (self.dir / "probe").write_text(PROBE, encoding="utf-8")
+        cold, warm = self.cold_and_warm("probe", "z")
+        self.assertEqual((cold.returncode, cold.stdout, cold.stderr), (warm.returncode, warm.stdout, warm.stderr))
+        self.assertEqual(cold.returncode, 0, cold.stderr)
+        self.assertEqual(json.loads(cold.stdout)["argv"], ["z"])
+        saved = self.cache().read_bytes()
+        self.assertEqual(os.path.realpath(os.fsdecode(saved[:-1])), os.path.realpath(sys.executable))
+
+    def test_a_compiled_or_zipped_script_is_a_plain_run_that_saves_no_cache(self):
+        # The boot reads a script as source, so these names skip it: Python runs them itself and nothing is saved.
+        py_compile.compile(str(self.dir / "probe.py"), cfile=str(self.dir / "probe.pyc"), doraise=True)
+        with zipfile.ZipFile(self.dir / "probe.zip", "w") as archive:
+            archive.writestr("__main__.py", PROBE)
+        shutil.copyfile(self.dir / "probe.pyc", self.dir / "probe.pyo")
+        shutil.copyfile(self.dir / "probe.zip", self.dir / "probe.pyz")
+        for name in ("probe.pyc", "probe.pyo", "probe.pyz", "probe.zip"):
+            with self.subTest(script=name):
+                cold, warm = self.cold_and_warm(name, "z")
+                self.assertEqual((cold.returncode, cold.stdout, cold.stderr), (warm.returncode, warm.stdout, warm.stderr))
+                self.assertEqual(cold.returncode, 0, cold.stderr)
+                self.assertEqual(json.loads(cold.stdout)["argv"], ["z"])
+                self.assertEqual(list(self.cache().parent.iterdir()), [], "a compiled or zipped script saved the cache")
+
     def test_store_stub_that_exits_49_silently_is_skipped(self):
         self.shim("python3", "exit 49")
         self.real_python("python")
@@ -590,7 +773,15 @@ print(json.dumps([normalize(sys.argv[1]), normalize(str(selected / 'python'))]))
                                    MSYSTEM="MINGW64", **{VARIABLE: posix(echo)})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["[c:/Users/A B/x.py]", "[/c/arg]"])
-        plain = self.run_launcher(TOOL, "warn", "/c/Users/x.py", path=[self.empty], **{VARIABLE: posix(echo)})
+        # Git\bin\sh.exe forces MSYSTEM=MINGW64; Git\usr\bin\sh.exe honours it being unset.
+        sh = Path(SH)
+        if WINDOWS:  # walk up from whichever Git sh.exe PATH found (bin or usr\bin) to the Git root
+            sh = next((p / "usr" / "bin" / "sh.exe" for p in sh.parents if (p / "usr" / "bin" / "sh.exe").is_file()), None)
+        if sh is None or not sh.exists():
+            self.skipTest("no Git usr\\bin\\sh.exe to run the no-MSYSTEM case")
+        plain = subprocess.run([str(sh), str(self.dir / "pyrun.sh"), TOOL, "warn", "/c/Users/x.py"], input="",
+                               text=True, capture_output=True, env=self.env([self.empty], **{VARIABLE: posix(echo)}),
+                               timeout=60)
         self.assertEqual(plain.stdout.splitlines(), ["[/c/Users/x.py]"])
 
     def test_unknown_tool_or_mode_is_an_error(self):

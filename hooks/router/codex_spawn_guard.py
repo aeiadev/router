@@ -35,18 +35,30 @@ def main() -> int:
              for key in common.mode_keys(routes)}
     classified = common.classify(ti.get("agent_type"), routes)
     brief = common.codex_brief(ti.get("task_name"), classified)
+    observable = common.observable_spawn_policy({"subagent_type": ti.get("agent_type"),
+                                                  "model": ti.get("model")}, routes, modes,
+                                                selected_model_observable=False)
+    if observable and observable["decision"] == "block":
+        common.log("spawns", {"decision": "block", "rule": observable["rule"], "shadow": False})
+        sys.stderr.write(observable["message"] + "\n")
+        return 2
 
     def choose(prior):
         return common.decide_codex_spawn(ti, routes, modes, prior)
 
     if brief and classified and classified["class"] == "exec":
         project = common.project_key(data.get("cwd"))
-        result = ledger.record_attempt_and_lane(common.codex_key(project, ti.get("task_name"), classified), choose,
+        outcome = ledger.record_attempt_and_lane(common.codex_key(project, ti.get("task_name"), classified), choose,
                                                 role=classified["base"], project=project,
                                                 session=common.session_hash(data.get("session_id")), brief=brief,
                                                 label=common.lane_label(ti.get("task_name"), routes),
-                                                ttl_hours=common.ladder_ttl_hours(routes))
-        if result is None:
+                                                ttl_hours=common.ladder_ttl_hours(routes), structured=True)
+        result = outcome["decision"]
+        if not outcome["accounting_committed"] and (result is None or result["decision"] != "block"):
+            common.log("spawns", {"decision": "allow", "rule": "accounting-unavailable",
+                                  "history_available": outcome["history_available"],
+                                  "failure_stage": outcome["failure_stage"],
+                                  "shadow": observable["shadow"] if observable else []})
             return 0
     else:
         result = choose([])

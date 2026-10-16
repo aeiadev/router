@@ -209,6 +209,26 @@ class Generated(Scratch):
         self.assertEqual((shared["name"], shared["version"], shared["author"], shared["license"]),
                          ("shared-roles", VERSION, OWNER, "MIT"))
 
+    def test_release_metadata_and_default_plugin_catalog_050(self):
+        self.assertEqual(VERSION, "0.5.0")
+        top = re.search(r"(?m)^## (\d+\.\d+\.\d+)$", (ROOT / "CHANGELOG.md").read_text()).group(1)
+        self.assertEqual(top, VERSION)
+        # No specialist role or always-loaded metadata joined the plugin catalog: the agents and
+        # skills it ships are byte-identical to the frozen Router default catalog.
+        records = []
+        for folder in ("agents", "skills"):
+            for path in (ROOT / "plugins/router" / folder).rglob("*"):
+                if path.is_file():
+                    records.append((path.relative_to(ROOT / "plugins/router").as_posix(),
+                                    hashlib.sha256(path.read_bytes()).hexdigest()))
+        for name in BASE_ROLES:
+            records.append((f"agents/{name}.md", hashlib.sha256((ROOT / "agents" / f"{name}.md").read_bytes()).hexdigest()))
+        names = sorted(name for name, _ in records)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(len(names), 28)  # 18 tiers + 9 base roles + the dispatch skill
+        digest = hashlib.sha256("".join(f"{n}\0{h}\n" for n, h in sorted(records)).encode()).hexdigest()
+        self.assertEqual(digest, "bc180ce825884b2c99098c438090217a78c781c80dc515b2270438d2aed86cd8")  # frozen 0.4.1 catalog bytes
+
     def test_tier_set_is_exactly_the_eighteen_variants(self):
         routes = json.loads((ROOT / "hooks/router/routes.json").read_text())
         tiers = {spec["agent"] for levels in routes["tiers"].values() for spec in levels.values()}

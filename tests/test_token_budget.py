@@ -480,5 +480,34 @@ class StatusLine(unittest.TestCase):
         self.assertIn("overlay: off (ROUTER_LOCAL=off)", result.stdout.splitlines())
 
 
+
+class DefaultCatalogParity050(unittest.TestCase):
+    def test_default_catalog_and_instructions_match_041(self):
+        # Optional runtime modules must not enlarge or rewrite normal-session
+        # instructions. Include paths so a new default role/skill also fails.
+        records = []
+        for folder in ("agents", "skills", "codex/agents"):
+            for path in (ROOT / folder).rglob("*"):
+                if path.is_file() and "__pycache__" not in path.parts:
+                    records.append((path.relative_to(ROOT).as_posix(),
+                                    hashlib.sha256(path.read_bytes()).hexdigest()))
+        actual = hashlib.sha256(json.dumps(sorted(records), separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(actual, "3a2c4a3b3f1f926aade80d07cf041e614d67923bce51b3e9341122a327a9bfd9",
+                         "Default catalog/instruction content differs from the pinned 0.4.1 baseline")
+
+    def test_default_budget_does_not_grow_and_stays_an_honest_estimate(self):
+        # 0.5.0 measured 1962 B always-on (491 tokens) with no always-on hook text. Optional SSH,
+        # policy and migration detail lives in commands and docs, so this must not rise.
+        result = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/budget.py"), "--check"],
+                                cwd=ROOT, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "budget (estimate: bytes/4, no tokenizer)")
+        always = re.search(r"always-on = (\d+) tokens", lines[1])
+        self.assertIsNotNone(always, lines[1])
+        self.assertLessEqual(int(always.group(1)), 491)
+        self.assertEqual(lines[2], "hooks: 0 B always-on (default config)")
+
+
 if __name__ == "__main__":
     unittest.main()

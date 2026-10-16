@@ -4,7 +4,8 @@
 Accepted exec attempts use a normalized TASK/FILES hash or a whole-prompt fallback.
 One ledger transaction (ledger.py) keeps the ladder consistent across concurrent hook
 processes. Rejected requests do not advance the round; only hashes and tiers are saved.
-A broken ledger is logged with its path and the call is allowed unchanged.
+An unavailable ledger leaves history unknown and allows only requests without an observable block,
+unchanged. A block already computed before a failed commit is retained.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -82,13 +83,23 @@ def main() -> int:
                       agent_pin=lambda name: common.agent_pin(name, data.get("cwd")),
                       cwd=data["cwd"] if isinstance(data.get("cwd"), str) and data["cwd"] else None)
 
+    early = common.observable_spawn_policy(ti, routes, modes, parent)
+    if early and early["decision"] == "block":
+        common.log("spawns", {"decision": "block", "rule": early["rule"], "shadow": False})
+        sys.stderr.write(early["message"] + "\n")
+        return 2
     if c and c["class"] == "exec":
         project = common.project_key(data.get("cwd"))
-        res = ledger.record_attempt_and_lane(common.claude_key(project, brief), choose, role=c["base"],
+        outcome = ledger.record_attempt_and_lane(common.claude_key(project, brief), choose, role=c["base"],
                                              project=project, session=common.session_hash(data.get("session_id")),
                                              brief=brief, label=common.lane_label(ti.get("description"), routes),
-                                             ttl_hours=common.ladder_ttl_hours(routes))
-        if res is None:
+                                             ttl_hours=common.ladder_ttl_hours(routes), structured=True)
+        res = outcome["decision"]
+        if not outcome["accounting_committed"] and (res is None or res["decision"] != "block"):
+            common.log("spawns", {"decision": "allow", "rule": "accounting-unavailable",
+                                  "history_available": outcome["history_available"],
+                                  "failure_stage": outcome["failure_stage"],
+                                  "shadow": early["shadow"] if early else []})
             return 0
     else:
         res = choose([])

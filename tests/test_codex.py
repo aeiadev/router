@@ -15,7 +15,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 sys.dont_write_bytecode = True
-from test_spawn import TIMEOUT
+from test_spawn import TIMEOUT, capture_hook_evidence, hook_test_root
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hooks/router/codex_spawn_guard.py"
 CLAUDE_GUARD = ROOT / "hooks/router/spawn_guard.py"
@@ -25,9 +25,7 @@ ROLES = ROOT / "codex/agents"
 
 class CodexSpawnTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="router-codex-test-")
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = hook_test_root(self, "router-codex-test-")
         self.state = self.root / "state"
         self.switch = self.root / "OFF"
         (self.root / "routes.local.json").write_text("{}", encoding="utf-8")
@@ -60,9 +58,10 @@ class CodexSpawnTests(unittest.TestCase):
                      "cwd": str(self.root)}
             event.update(event_fields or {})
             raw = json.dumps(event)
-        return subprocess.run([sys.executable, "-B", str(guard)], input=raw,
-                              text=True, capture_output=True, timeout=TIMEOUT,
-                              cwd=self.root, env=dict(self.environment, **(extra or {})))
+        result = subprocess.run([sys.executable, "-B", str(guard)], input=raw,
+                                text=True, capture_output=True, timeout=TIMEOUT,
+                                cwd=self.root, env=dict(self.environment, **(extra or {})))
+        return capture_hook_evidence(self, result)
 
     def assert_allowed(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)

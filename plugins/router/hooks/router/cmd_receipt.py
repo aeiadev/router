@@ -1,7 +1,11 @@
 """Explicit, local receipt recording commands. No hook writes or acceptance decisions."""
 import argparse
 import json
+import os
+import stat
 import sys
+
+import compat
 
 HELP = "receipt create TASK_ID --file PATH | record TASK_ID --file PATH | show TASK_ID: local recording only"
 MAX_INPUT_BYTES = 64 * 1024
@@ -12,8 +16,16 @@ def _read_object(path):
         if path == "-":
             raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
         else:
-            with open(path, "rb") as source:
-                raw = source.read(MAX_INPUT_BYTES + 1)
+            descriptor = compat.open_fd(path)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise ValueError("input must be a regular file")
+                with os.fdopen(descriptor, "rb") as source:
+                    descriptor = -1
+                    raw = source.read(MAX_INPUT_BYTES + 1)
+            finally:
+                if descriptor != -1:
+                    os.close(descriptor)
     except OSError as exc:
         raise ValueError("cannot read input file") from exc
     if len(raw) > MAX_INPUT_BYTES:

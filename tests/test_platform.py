@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _platform  # noqa: E402
@@ -103,6 +104,26 @@ class HomeEnv(unittest.TestCase):
                          env=dict(os.environ, **home_env(folder)), capture_output=True, text=True,
                          stdin=subprocess.DEVNULL)
             self.assertEqual(result.stdout.strip(), folder)
+
+
+class CanonicalTempRoot(unittest.TestCase):
+    @_platform.skip_unless_symlinks("a TMPDIR reached through a symlinked ancestor, as macOS /var is")
+    def test_root_has_no_symlink_component_when_tmpdir_is_an_alias(self):
+        with tempfile.TemporaryDirectory() as parent:
+            real = Path(os.path.realpath(parent)) / "real"
+            real.mkdir()
+            alias = Path(parent) / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with patch.dict(os.environ, {"TMPDIR": str(alias)}), patch.object(tempfile, "tempdir", None):
+                temporary = tempfile.TemporaryDirectory(prefix="canonical-")
+            with temporary:
+                self.assertTrue(alias.is_symlink())
+                self.assertEqual(Path(temporary.name).parent, alias)
+                for given in (temporary, temporary.name):
+                    root = _platform.canonical_temp_root(given)
+                    self.assertEqual(str(root), os.path.realpath(str(root)))
+                    self.assertEqual(str(root), os.path.realpath(temporary.name))
+                    self.assertTrue(root.is_dir())
 
 
 class Timeout(unittest.TestCase):

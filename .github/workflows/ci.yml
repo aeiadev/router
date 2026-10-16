@@ -25,9 +25,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.HARNESS_REPOSITORY }}
-          ref: ${{ env.HARNESS_PINNED_REF }}
           path: harness
           fetch-depth: 0
+      - name: Harness ref
+        run: |
+          set -euo pipefail
+          ref=$(bash scripts/harness-ref.sh resolve harness VERSION "$HARNESS_PINNED_REF")
+          git -C harness checkout -q --detach "$ref"
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -49,6 +53,8 @@ jobs:
           old_tree harness harness-0.1 063388b95632e935d53ba5ae058659b51960308d HARNESS_V01
           old_tree harness harness-0.2 3b80d6fbaa3d15970e6f0e1409d141b952f0b7f2 HARNESS_V02
       - name: Tests
+        env:
+          HARNESS_DIR: ${{ github.workspace }}/harness
         run: python tests/run_all.py
       - name: Shared pins
         if: ${{ !cancelled() }}
@@ -135,6 +141,39 @@ jobs:
           ref=$(bash scripts/harness-ref.sh resolve harness VERSION "$HARNESS_PINNED_REF")
           git -C harness checkout -q --detach "$ref"
       - run: cmp agents/SHARED.sha256 harness/agents/SHARED.sha256
+  ssh-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HARNESS_REPOSITORY }}
+          path: harness
+          fetch-depth: 0
+      - name: Harness ref
+        run: |
+          set -euo pipefail
+          ref=$(bash scripts/harness-ref.sh resolve harness VERSION "$HARNESS_PINNED_REF")
+          if [ -z "$ref" ]; then echo "error: no Harness ref resolved for the SSH fixture" >&2; exit 1; fi
+          git -C harness checkout -q --detach "$ref"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build pinned SSH fixture
+        run: |
+          set -euo pipefail
+          podman pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          python3 -B harness/tests/fixtures/ssh-disposable/run.py --engine podman --build
+      - name: Required SSH workflow proof
+        env:
+          SSH_FIXTURE_ENGINE: podman
+          HARNESS_DIR: ${{ github.workspace }}/harness
+        run: SSH_FIXTURE_REQUIRED=1 python3 -B tests/test_operations_ssh.py
   secrets:
     runs-on: ubuntu-latest
     steps:

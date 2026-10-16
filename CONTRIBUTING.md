@@ -2,6 +2,8 @@
 
 Run the whole suite with `python3 tests/run_all.py` (`python tests/run_all.py` in Git Bash on Windows); it runs every test file and lists every failure.
 No test calls a model or the network; CI also checks out the sibling repository and builds the old release trees.
+
+The exception is opt-in: with `SSH_FIXTURE_REQUIRED=1` and `HARNESS_DIR` set, the real SSH tests start the Harness local container, and preparing its pinned image needs a container engine and network access (see `tests/fixtures/operations_ssh/README.md`). The default run skips them and records them as unrun.
 Python 3.9 or newer, standard library only.
 Keep a change small and add a test that fails without it.
 

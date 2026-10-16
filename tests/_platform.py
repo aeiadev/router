@@ -26,8 +26,9 @@ POSIX_MODES = not IS_WINDOWS  # NTFS keeps only a read-only flag; chmod 0o700 re
 
 
 def canonical_temp_root(temporary):
-    """Canonical root for an ordinary TemporaryDirectory fixture, while it still exists."""
-    return Path(temporary.name).resolve(strict=True)
+    """Canonical root for an ordinary TemporaryDirectory fixture (the object or the folder name its `with`
+    yields), while it still exists: no symlinked ancestor such as macOS /var, which the guards refuse."""
+    return Path(getattr(temporary, "name", temporary)).resolve(strict=True)
 
 
 def _under(path, folder):

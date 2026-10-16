@@ -268,6 +268,11 @@ class CompatTests(unittest.TestCase):
         self.assertEqual(compat.NOFOLLOW, 0)
 
 
+# The shared commands installer is standalone (vendored byte-for-byte into Harness, so it cannot
+# import Router compat); it guards its own platform calls and has native Windows/macOS tests.
+SHARED_INSTALL_HELPER = "scripts/commands_install.py"
+
+
 def shipped_python():
     sys.path.insert(0, str(ROOT / "tests"))
     try:
@@ -275,7 +280,7 @@ def shipped_python():
     finally:
         sys.path.remove(str(ROOT / "tests"))
     return [(label, text) for label, text in shipped_sources()
-            if not label.replace("\\", "/").endswith("hooks/router/compat.py")]
+            if not label.replace("\\", "/").endswith(("hooks/router/compat.py", SHARED_INSTALL_HELPER))]
 
 
 def banned_uses(text):

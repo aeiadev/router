@@ -47,6 +47,24 @@ DETACH = 'git -C harness checkout -q --detach "$ref"'
 TOGETHER = "HARNESS_DIR=$PWD/harness bash tests/together.sh"
 GITLEAKS = 'docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.18.4 detect --source . --no-banner'
 ACTIONS = {"actions/checkout@v4", "actions/setup-python@v5"}
+SSH_BASE = "docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55"
+SSH_SETUP = ("set -euo pipefail\n" + "podman pull " + SSH_BASE + "\n"
+             "python3 -B harness/tests/fixtures/ssh-disposable/run.py --engine podman --build\n")
+SSH_RUN = "SSH_FIXTURE_REQUIRED=1 python3 -B tests/test_operations_ssh.py"
+REF_RUN = "set -euo pipefail\n" + RESOLVE + "\n" + DETACH + "\n"  # shared-drift and test
+# The Tests step reads the resolved checkout, named as ssh-integration names it; the paired
+# commands-profile gate and the sibling-checkout tests skip without it.
+TESTS_ENV = {"HARNESS_DIR": "${{ github.workspace }}/harness"}
+NO_EMPTY_REF = 'if [ -z "$ref" ]; then echo "error: no Harness ref resolved for the SSH fixture" >&2; exit 1; fi'
+SSH_REF = "set -euo pipefail\n" + RESOLVE + "\n" + NO_EMPTY_REF + "\n" + DETACH + "\n"
+SSH_JOB = {"runs-on": "ubuntu-latest", "timeout-minutes": 20,
+           "permissions": {"contents": "read"}, "steps": [
+               CHECKOUT, SIBLING_CHECKOUT, {"name": "Harness ref", "run": SSH_REF},
+               {"uses": "actions/setup-python@v5", "with": {"python-version": "3.13"}},
+               {"name": "Build pinned SSH fixture", "run": SSH_SETUP},
+               {"name": "Required SSH workflow proof",
+                "env": {"SSH_FIXTURE_ENGINE": "podman", "HARNESS_DIR": "${{ github.workspace }}/harness"},
+                "run": SSH_RUN}]}
 SECURITY = [
     "Only the latest release is supported.",
     "Report a vulnerability privately through GitHub\x27s private vulnerability reporting on this repository. If that is not available, open an issue that says a security report is waiting and leave the details out.",
@@ -262,8 +280,7 @@ def setup_problems(name, steps):
     errors = []
     if not steps or steps[0] != AUTOCRLF:
         errors.append("autocrlf in " + name)
-    sibling = PINNED_CHECKOUT if name == "test" else SIBLING_CHECKOUT
-    if CHECKOUT not in steps or sibling not in steps:
+    if CHECKOUT not in steps or SIBLING_CHECKOUT not in steps:
         errors.append("checkouts in " + name)
     if SETUP_PYTHON not in steps:
         errors.append("setup-python in " + name)
@@ -297,7 +314,7 @@ def problems(text):
     if env.get("HARNESS_PINNED_REF") != PINNED:
         errors.append("sibling ref variable")
     jobs = tree.get("jobs") or {}
-    if set(jobs) != {"test", "together", "shared-drift", "secrets"}:
+    if set(jobs) != {"test", "together", "shared-drift", "secrets", "ssh-integration"}:
         return errors + ["jobs"]
     test, together, drift, secrets = (jobs[name] for name in ("test", "together", "shared-drift", "secrets"))
     errors += matrix_problems("test", test)
@@ -308,12 +325,17 @@ def problems(text):
     suite = named(steps, "Tests")
     if suite is None or steps[suite].get("run") != "python tests/run_all.py" or "if" in steps[suite]:
         errors.append("run_all in test")
+    if suite is None or steps[suite].get("env") != TESTS_ENV:
+        errors.append("harness dir in test")
     places = [named(steps, check) for check, _ in TEST_CHECKS]
     if (suite is None or None in places or places != sorted(places) or places[0] < suite
             or any(steps[index].get("run") != command for index, (_, command) in zip(places, TEST_CHECKS))):
         errors.append("checks in test")
     elif any(step.get("if") != AFTER_FAILURE for step in steps[suite + 1:]):
         errors.append("checks after a failure")
+    ref = named(steps, "Harness ref")
+    if ref is None or suite is None or ref > suite or steps[ref] != {"name": "Harness ref", "run": REF_RUN}:
+        errors.append("harness ref in test")
     steps = together.get("steps") or []
     found, together_trees = setup_problems("together", steps)
     errors += found
@@ -337,12 +359,20 @@ def problems(text):
         errors.append("shared drift")
     if secrets != {"runs-on": "ubuntu-latest", "steps": [{"uses": "actions/checkout@v4"}, {"run": GITLEAKS}]}:
         errors.append("secrets")
+    steps = jobs["ssh-integration"].get("steps") or []
+    ref, build = named(steps, "Harness ref"), named(steps, "Build pinned SSH fixture")
+    if (PINNED_CHECKOUT in steps or SIBLING_CHECKOUT not in steps or ref is None or build is None or build < ref
+            or any(part not in steps[ref].get("run", "") for part in (RESOLVE, NO_EMPTY_REF, DETACH))):
+        errors.append("harness ref in ssh-integration")
+    if jobs["ssh-integration"] != SSH_JOB:
+        errors.append("required SSH integration")
     for job_name, script in runs(tree):
-        if re.search(NETWORK_WORDS, script) and not (job_name == "secrets" and script == GITLEAKS):
+        if re.search(NETWORK_WORDS, script) and not ((job_name == "secrets" and script == GITLEAKS)
+                                                      or (job_name == "ssh-integration" and script == SSH_SETUP)):
             errors.append("network use in " + job_name)
         if re.search(r"\bfor \w+ in [^;\n]*tests/", script):
             errors.append("test loop in " + job_name)
-        if re.search(r"(?m)(^|[\s;&|(])python3\b", script):
+        if re.search(r"(?m)(^|[\s;&|(])python3\b", script) and job_name != "ssh-integration":
             errors.append("python3 in " + job_name)
         for path in re.findall(r"(?<![\w/$])(?:tests|scripts|codex|agents)/[\w.*-]+(?:/[\w.*-]+)*", script):
             if "*" not in path and not (ROOT / path).exists():
@@ -444,6 +474,11 @@ class CIWorkflowTests(unittest.TestCase):
     def test_broken_workflows_are_rejected(self):
         text = CI.read_text()
         trees = OLD_TREES[1]
+        # The test job's Harness checkout and resolve step; the setup-python line makes it unique.
+        TEST_REF = ("      - uses: actions/checkout@v4\n        with:\n          repository: ${{ env.HARNESS_REPOSITORY }}\n"
+                    "          path: harness\n          fetch-depth: 0\n      - name: Harness ref\n        run: |\n"
+                    + "".join("          " + line + "\n" for line in REF_RUN.splitlines())
+                    + "      - uses: actions/setup-python@v5\n        with:\n          python-version: ${{ matrix.python-version }}\n")
         mutations = (
             ("os: [ubuntu-latest, macos-latest, windows-latest]", "os: [ubuntu-latest, macos-latest]",
              ["os matrix in test", "os matrix in together"]),
@@ -458,7 +493,9 @@ class CIWorkflowTests(unittest.TestCase):
             ("  HARNESS_REPOSITORY: " + REPOSITORY, "  HARNESS_REPOSITORY: aeiadev/harness",
              ["sibling repository variable"]),
             ("  HARNESS_PINNED_REF: " + PINNED, "  HARNESS_PINNED_REF: main", ["sibling ref variable"]),
-            ("          ref: ${{ env.HARNESS_PINNED_REF }}\n", "", ["checkouts in test"]),
+            (TEST_REF, TEST_REF.replace("          path: harness\n", "          ref: ${{ env.HARNESS_PINNED_REF }}\n          path: harness\n"),
+             ["checkouts in test"]),
+            (TEST_REF, TEST_REF.split("      - name: Harness ref\n")[0] + TEST_REF.split(DETACH + "\n")[1], ["harness ref in test"]),
             ("run: python tests/run_all.py", 'run: for t in tests/test_*.py; do python3 "$t" || exit 1; done',
              ["run_all in test", "test loop in test", "python3 in test"]),
             ("run: python scripts/gen_plugin.py --check", "run: python3 scripts/gen_plugin.py --check",
@@ -469,16 +506,28 @@ class CIWorkflowTests(unittest.TestCase):
              ["autocrlf in test", "autocrlf in together"]),
             ("python-version: ${{ matrix.python-version }}", "python-version: '3.13'",
              ["setup-python in test", "setup-python in together"]),
-            (RESOLVE, "ref=main", ["harness ref", "shared drift"]),
+            (RESOLVE, "ref=main", ["harness ref in test", "harness ref", "shared drift", "harness ref in ssh-integration",
+                                   "required SSH integration"]),
             ("run: " + TOGETHER, "run: bash tests/together.sh", ["together run"]),
             ("harness-ref: [resolved, latest-tag]", "harness-ref: [main, latest-tag]", ["harness-ref matrix in together"]),
             ("run: cmp agents/SHARED.sha256", "run: pip install x; cmp agents/SHARED.sha256",
              ["shared drift", "network use in shared-drift"]),
             ("zricethezav/gitleaks:v8.18.4", "zricethezav/gitleaks", ["secrets", "network use in secrets"]),
             ("actions/setup-python@v5", "actions/setup-python@main",
-             ["setup-python in test", "setup-python in together", "action pin actions/setup-python@main"]),
+             ["setup-python in test", "setup-python in together", "required SSH integration",
+              "action pin actions/setup-python@main"]),
             ("    runs-on: ${{ matrix.os }}", "    runs-on: ${{ matrix.os ", None),
             ("python tests/run_all.py", "python tests/run_every.py", ["run_all in test", "missing tests/run_every.py"]),
+            ("run: " + SSH_RUN, "run: python3 -B tests/test_operations_ssh.py", ["required SSH integration"]),
+            ("      - name: Harness ref\n        run: |\n" + "".join("          " + line + "\n" for line in SSH_REF.splitlines()),
+             "", ["harness ref in ssh-integration", "required SSH integration"]),
+            ("          " + NO_EMPTY_REF + "\n", "", ["harness ref in ssh-integration", "required SSH integration"]),
+            ("          SSH_FIXTURE_ENGINE: podman\n          HARNESS_DIR: ${{ github.workspace }}/harness\n",
+             "          SSH_FIXTURE_ENGINE: podman\n", ["required SSH integration"]),
+            ("      - name: Tests\n        env:\n          HARNESS_DIR: ${{ github.workspace }}/harness\n",
+             "      - name: Tests\n", ["harness dir in test"]),
+            ("      - name: Tests\n        env:\n          HARNESS_DIR: ${{ github.workspace }}/harness\n",
+             "      - name: Tests\n        env:\n          HARNESS_DIR: harness\n", ["harness dir in test"]),
         )
         for old, new, expected in mutations:
             with self.subTest(old=old[:50]):
@@ -620,6 +669,36 @@ class SiblingRefTests(unittest.TestCase):
         done = self.repo.run("resolve", "0.3.1", "no-such-ref")
         self.assertEqual((done.returncode, done.stdout), (1, ""))
         self.assertEqual(done.stderr, "%s: harness has no ref no-such-ref\n" % SCRIPT_NAME)
+
+    def test_ssh_job_detaches_the_resolved_ref_and_fails_without_one(self):
+        steps = load_yaml(CI.read_text())["jobs"]["ssh-integration"]["steps"]
+        script = steps[named(steps, "Harness ref")]["run"]
+        tagged = self.repo.commit("0.3.1")
+        self.repo.tag("v0.3.1", tagged)
+        head = self.repo.commit("0.3.2")
+        self.repo.checkout()
+        self.repo.own.write_bytes(b"0.3.1\n")
+        (self.tmp / "scripts").mkdir()
+        resolver = self.tmp / "scripts/harness-ref.sh"
+
+        def step(pin):
+            env = dict(self.repo.env, HARNESS_PINNED_REF=pin, SIBLING_REF_TRIES="0")
+            done = subprocess.run([BASH[0], "-c", script], env=env, cwd=str(self.tmp), stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=60)
+            return done, self.repo.git("-C", str(self.repo.clone), "rev-parse", "HEAD")
+
+        resolver.write_bytes(REF_SCRIPT.read_bytes())
+        for pin, expected in (("v0.3.1", tagged), ("", tagged)):
+            with self.subTest(pin=pin):
+                done, at = step(pin)
+                self.assertEqual((done.returncode, at), (0, expected), done.stderr)
+        self.repo.git("-C", str(self.repo.clone), "checkout", "-q", "--detach", head)
+        done, at = step("no-such-ref")
+        self.assertEqual((done.returncode, at), (1, head), done.stderr)
+        resolver.write_bytes(b"exit 0\n")
+        done, at = step("v0.3.1")
+        self.assertEqual((done.returncode, at), (1, head), done.stderr)
+        self.assertIn("no Harness ref resolved for the SSH fixture", done.stderr)
 
     def test_latest_tag_matches_version_exactly(self):
         for tags, version, expected in ((["v0.3.2", "v0.3.3-rc1"], "0.3.0", ""),

@@ -113,6 +113,15 @@ class UpgradeBase(unittest.TestCase):
 
 
 class UpgradeCleanup(UpgradeBase):
+    def test_full_uninstall_preserves_separate_commands_profile_files(self):
+        profile = self.host_home("claude") / "router-commands"
+        profile.mkdir(parents=True)
+        marker = profile / "custom.txt"
+        marker.write_text("private commands data")
+        self.install("--host", "claude")
+        self.install("--host", "claude", "--uninstall")
+        self.assertEqual(marker.read_text(), "private commands data")
+
     def old_only(self, old, agents):
         """Agent files the old tree ships and this checkout does not."""
         names = lambda folder: {path.name for path in folder.iterdir() if path.is_file()}

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0
+
+Pairs with Harness 0.5.0.
+
+0.5.0 pairs Router and Harness. Router keeps governed routing exclusions in force when accounting fails and provides an opt-in, isolated commands profile; Harness supplies bounded SSH inspection with explicit project policy. Remote interception requires an active, qualified full Harness hook; the commands profile is local and registers no hooks.
+
+- Keep observable exclusions on governed roles blocking when the ledger is unavailable or a commit fails, and check Router-selected models against configured exclusions. Native and custom agents pass through unchanged. When history is unavailable, no ladder cap is claimed as enforced.
+- Bound receipt file input to 64 KiB regular files; unsupported special inputs are rejected before anything is recorded. Receipts remain coordinator attestations, not host proof.
+- Add an opt-in `--profile commands` install for Claude Code or Codex: saved dry-run plan, then apply, with an isolated launcher and state, no hooks, roles or instructions, and reversible uninstall. Native Windows lifecycle and ACL protection are not qualified.
+- Verify with paired tests that the commands profile preserves unrelated host files, launchers and legacy installs when Router and Harness are installed in either order.
+- Add paired operations workflow tests and `docs/host-validation.md`, which separates offline adapter tests, installed executable and hook tests, and live host or connector tests. Supplied observation JSON is not authenticated readback.
+- Make the CI `test` job use the resolved Harness ref.
+- `pyrun.sh` saves the interpreter it found only after the script exits 0, so a rejected command or a missing script leaves no `python` cache; Python still replaces the launcher.
+- Fix tests for macOS and Windows; these are test-only changes.
+- Context: the default agent and skill catalog is byte-identical to 0.4.1 (56 files) and no always-on hook text was added. Budgets use bytes/4 estimates, not measured billing or savings.
+
+Full Router and Harness suites ran natively on Linux, macOS and Windows with Python 3.9 and 3.13 (six cells), with 0 failures and every skip named and reviewed.
+Windows skips the POSIX-only tests and, because 0.2 predates Windows support, the version-skew checks that uninstall the 0.2 tool first or expect a skew notice after a Harness 0.2 install.
+The macOS and Windows Python 3.9 cells skip the tests that run the 0.1 and 0.2 release installers, which need Python 3.10 or newer.
+The required SSH integration test ran on Linux only. The PyYAML parity tests ran on Linux with Python 3.9 and 3.13 with PyYAML installed.
+
+Live-host, installed-runtime and paid-pilot qualification have not been run, and nothing here is a qualified release claim. See [the release notes](docs/releases/0.5.0.md).
+
 ## 0.4.1
 
 Pairs with Harness 0.4.1.

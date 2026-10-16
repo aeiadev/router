@@ -1542,8 +1542,52 @@ def mode_keys(routes) -> tuple:
     return MODE_KEYS if key in MODE_KEYS else MODE_KEYS + (key,)
 
 
+def ladder_model(classified, routes, round_three=False):
+    """The enforced exec ladder's model, including configured untiered injection."""
+    if round_three:
+        return "opus"
+    entry = classified["entry"]
+    levels = routes.get("tiers", {}).get(classified["base"], {})
+    return "sonnet" if entry.get("tiered") and levels else entry.get("inject")
+
+
+def observable_spawn_policy(tool_input, routes, modes, session_model=None,
+                            selected_model_observable=True):
+    """Evaluate exclusions visible without ledger history; never infer a ladder round."""
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    raw_type = ti.get("subagent_type")
+    if passthrough(raw_type, routes):
+        return None
+    never = {name.lower() for name in routes.get("router", {}).get("never", [])}
+    model = norm_model(ti.get("model"), never)
+    rule = "never-model" if model in never else None
+    if not rule and is_fork(raw_type) and norm_model(session_model, never) in never:
+        rule = "fork-never"
+    # History is unknown: block only when every possible ladder selection is
+    # excluded. Use the same selection as the decision engine, including inject
+    # for untiered roles (None means no selected model). Codex TOMLs stay opaque.
+    classified = classify(raw_type, routes) if selected_model_observable else None
+    if (not rule and classified and classified["class"] == "exec"
+            and effective_mode(modes.get("ladder")) == "enforce"):
+        selections = {norm_model(ladder_model(classified, routes, upper), never)
+                      for upper in (False, True)}
+        if selections <= never:
+            rule = "never-selected"
+    if not rule:
+        return None
+    mode = effective_mode(modes.get("block_model"))
+    if mode == "off":
+        return None
+    return {"decision": "block" if mode == "enforce" else "allow", "rule": rule,
+            "message": ("This fork would inherit an excluded model. Use a named agent." if rule == "fork-never"
+                        else "This model is excluded by the route table."),
+            "updated": None, "asked_type": raw_type or "worker", "run_type": raw_type or "worker",
+            "run_model": model, "class": None, "tier": None, "brief": None, "round": None,
+            "notes": [], "shadow": [rule] if mode == "shadow" else []}
+
+
 def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin=None, route=None,
-                 tier_agent=None, cwd=None) -> dict:
+                 tier_agent=None, cwd=None, selected_model_observable=True) -> dict:
     """Return allow, rewrite, or block, without reading or writing state. tier_agent maps a
     tier agent to the name to emit; the default, plugin_tier_agent, reads the Claude home and
     the project of cwd (the payload's; None means the process cwd)."""
@@ -1567,6 +1611,14 @@ def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin
         if decision == "rewrite":
             res["run_type"] = res["updated"]["subagent_type"]
             res["run_model"] = res["updated"]["model"]
+            selected = norm_model(res["run_model"], router.get("never", []))
+            excluded = {name.lower() for name in router.get("never", [])}
+            if selected_model_observable and selected in excluded:
+                if mode("block_model") == "enforce":
+                    res.update(decision="block", rule="never-selected", updated=None,
+                               message="The selected model is excluded by the route table.")
+                elif mode("block_model") == "shadow":
+                    res["shadow"].append("never-selected")
         return res
 
     def trip(rule, key, message):
@@ -1648,7 +1700,9 @@ def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin
 
     levels = routes.get("tiers", {}).get(base, {})
     if not entry.get("tiered") or not levels:
-        target = "opus" if cls == "judge" or (ladder and rnd == 3 and mode("ladder") == "enforce") else entry.get("inject")
+        target = "opus" if cls == "judge" else entry.get("inject")
+        if ladder and mode("ladder") == "enforce":
+            target = ladder_model(c, routes, rnd == 3)
         res["tier"] = "up" if target == "opus" else "std"
         force = ladder and mode("ladder") == "enforce"
         if target and (force or ((model is None or cls == "judge") and mode("inject") == "enforce")):
@@ -1692,7 +1746,7 @@ def decide_spawn(tool_input, routes, modes, prior, session_model=None, agent_pin
     spec = levels[tier]
     target_model = "opus" if cls == "judge" else spec["model"]
     if ladder and mode("ladder") == "enforce":
-        target_model = "opus" if rnd == 3 else "sonnet"
+        target_model = ladder_model(c, routes, rnd == 3)
     updated = dict(ti, subagent_type=(tier_agent or (lambda name: plugin_tier_agent(name, cwd)))(spec["agent"]), model=target_model)
     if base == "builder":
         updated["isolation"] = "worktree"
@@ -1749,7 +1803,8 @@ def decide_codex_spawn(tool_input, routes, modes, prior) -> dict:
     normalized = {"subagent_type": role, "prompt": ""}
     if "model" in ti:
         normalized["model"] = ti["model"]
-    result = decide_spawn(normalized, routes, modes, prior, route=route, tier_agent=str)
+    result = decide_spawn(normalized, routes, modes, prior, route=route, tier_agent=str,
+                          selected_model_observable=False)
     result["brief"] = brief
     result["run_type"] = role
     result["run_model"] = None  # selected by the editable role TOML, never guessed here

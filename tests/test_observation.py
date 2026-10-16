@@ -96,6 +96,26 @@ class ObservationContract(unittest.TestCase):
             assess({**self.expected, "requirements": {}}, {"schema_version": 1,
                                                               "read_status": "ok"})
 
+    def test_stale_evidence_fails_and_supplied_json_is_not_authenticated(self):
+        stale = self.healthy()
+        # Same bytes at a later revision: only the revision tells stale evidence apart.
+        self.service.worker.write("after", "rev_3")
+        current = {**self.expected, "revision_id": "rev_3"}
+        count = self.service.mutation_count
+        self.assertEqual(assess(current, stale)["reported_verdict"], "FAIL")
+        self.assertEqual(assess(current, self.service.observer.read("task_1", "target_1"))
+                         ["reported_verdict"], "PASS")
+        # A hand-built proof for bytes the service never held also reports PASS: the command
+        # cannot authenticate supplied JSON, so it must say nothing was verified.
+        forged = {**stale, "revision_id": "rev_9", "requirements": {"r1": digest("never written")}}
+        report = assess({**self.expected, "revision_id": "rev_9",
+                         "requirements": {"r1": digest("never written")}}, forged)
+        self.assertEqual(report["reported_verdict"], "PASS")
+        self.assertFalse(report["host_verified"])
+        self.assertEqual(report["independent_acceptance"], "unverified")
+        self.assertNotIn(b"never written", self.service.path.read_bytes())
+        self.assertEqual(self.service.mutation_count, count)
+
     def test_cli_is_bounded_report_only_and_private(self):
         observed = self.healthy()
         env = {**os.environ, **home_env(self.home), "PYTHONDONTWRITEBYTECODE": "1"}

@@ -1,0 +1,54 @@
+#!/bin/sh
+""":"
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+        exec "$candidate" -I -B "$0" "$@"
+    fi
+done
+if command -v py >/dev/null 2>&1 &&
+   py -3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    exec py -3 -I -B "$0" "$@"
+fi
+echo 'router commands: Python 3.9 or newer unavailable' >&2
+exit 1
+":"""
+"""Restricted, relocatable Router commands entry point."""
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+allowed = {"operations", "observe", "receipt", "usage", "evaluate",
+           "status", "doctor", "help", "version"}
+if len(sys.argv) > 1 and sys.argv[1] not in allowed:
+    print("router commands: command unavailable in commands-only profile", file=sys.stderr)
+    sys.exit(2)
+real = Path(__file__).resolve()
+root = real.parent.parent
+package = root / "hooks" / "router"
+required = {"bin/router-commands", "profile.json", *(
+    "hooks/router/" + name + ".py" for name in
+    ("command_runtime", "receipt_context", "receipts", "compat", "operations",
+     "observation", "evaluation", "usage", "cmd_observe", "cmd_receipt", "cmd_evaluate"))}
+try:
+    manifest_path = root / "manifest.json"
+    if manifest_path.exists() or (root / "profile.json").exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        inventory = manifest["files"]
+        if set(inventory) != required:
+            raise ValueError("incomplete runtime inventory")
+        for name, record in inventory.items():
+            target = root / name
+            if not target.is_file() or target.is_symlink() or hashlib.sha256(target.read_bytes()).hexdigest() != record["sha256"]:
+                raise ValueError("runtime drift")
+    elif not (package / "command_runtime.py").is_file():
+        raise ValueError("source runtime missing")
+except (OSError, ValueError, KeyError, TypeError):
+    print("router commands: runtime unavailable", file=sys.stderr)
+    sys.exit(1)
+sys.path.insert(0, str(package))
+from command_runtime import main
+
+sys.exit(main(sys.argv[1:], root=root))

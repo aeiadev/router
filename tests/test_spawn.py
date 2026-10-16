@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -26,11 +28,50 @@ BRIEF = "TASK add a text helper\nFILES src/text.py\nBAR run unit tests\nRETURN f
 TIMEOUT = 60
 
 
+def hook_test_root(test, prefix):
+    """Opt in to retained synthetic fixtures and per-call accounting evidence.
+
+    Set ROUTER_TEST_EVIDENCE to a disposable directory when running a gate.
+    No environment, request payload or hook stdout is included in snapshots.
+    """
+    evidence = os.environ.get("ROUTER_TEST_EVIDENCE")
+    test.retain_evidence = bool(evidence)
+    if evidence:
+        Path(evidence).mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix=prefix, dir=evidence))
+        (root / "test-id.txt").write_text(test.id(), encoding="utf-8")
+        print(f"\nRetained hook evidence: {root}", file=sys.stderr)
+        return root
+    temporary = tempfile.TemporaryDirectory(prefix=prefix)
+    test.addCleanup(temporary.cleanup)
+    return Path(temporary.name)
+
+
+def capture_hook_evidence(test, result):
+    if not test.retain_evidence:
+        return result
+    snapshots = test.root / "snapshots"
+    snapshots.mkdir(exist_ok=True)
+    snapshot = Path(tempfile.mkdtemp(prefix="call-", dir=snapshots))
+    metadata = {"test": test.id(), "finished_ns": time.time_ns(), "returncode": result.returncode,
+                "stderr": result.stderr[:2048]}
+    # Copy bytes after the hook exits without opening SQLite or adding locks.
+    # Concurrent calls may still be writing; retain sidecars and flag that these
+    # are observations, not guaranteed transaction-consistent database backups.
+    metadata["snapshot_kind"] = "post-hook file copies; concurrent writers may remain"
+    for name in ("ledger.sqlite3", "ledger.sqlite3-wal", "ledger.sqlite3-shm",
+                 "ledger.sqlite3-journal", "errors.jsonl", "spawns.jsonl"):
+        try:
+            shutil.copyfile(test.state / name, snapshot / name)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+    (snapshot / "result.json").write_text(json.dumps(metadata), encoding="utf-8")
+    return result
+
+
 class SpawnTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="router-spawn-test-")
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = hook_test_root(self, "router-spawn-test-")
         self.state = self.root / "state"
         self.switch = self.root / "OFF"
         self.routes_path = self.root / "routes.json"
@@ -67,9 +108,10 @@ class SpawnTests(unittest.TestCase):
             event.update(event_fields or {})
             raw = json.dumps(event)
         environment = dict(self.environment, **(extra or {}))
-        return subprocess.run([sys.executable, str(GUARD)], input=raw,
-                              text=True, capture_output=True, timeout=TIMEOUT,
-                              cwd=self.root, env=environment)
+        result = subprocess.run([sys.executable, str(GUARD)], input=raw,
+                                text=True, capture_output=True, timeout=TIMEOUT,
+                                cwd=self.root, env=environment)
+        return capture_hook_evidence(self, result)
 
     @staticmethod
     def input(prompt=BRIEF, agent="builder", **fields):

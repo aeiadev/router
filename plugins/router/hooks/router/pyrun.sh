@@ -201,15 +201,14 @@ if ! usable "$py"; then
   read_cached_python
   py=$cached
 fi
+commit=
 if ! usable "$py"; then
   probe_python || :
   py=$discovered
   # Cache only in the tool's existing state folder (its hooks make it): read-only commands write nothing.
+  # Python saves it below, and only once the script exits 0: a rejected run leaves no cache.
   cache_dir=${cache%[/\\]*}  # an interpreter-built native cache path uses backslashes
-  if [ -n "$py" ] && [ -n "$cache_ok" ] && [ -z "$find" ] && [ -d "$cache_dir" ]; then
-    (umask 077 && printf '%s\n' "$py" > "$cache.$$" && mv -f "$cache.$$" "$cache") 2>/dev/null ||
-      rm -f "$cache.$$" 2>/dev/null
-  fi
+  if [ -n "$py" ] && [ -n "$cache_ok" ] && [ -z "$find" ] && [ -d "$cache_dir" ]; then commit=1; fi
 fi
 if [ -z "$py" ]; then
   message="$tool: no Python 3.9 or newer found (python3, python, py -3); install one or set $name"
@@ -231,5 +230,83 @@ esac
 if [ -n "${MSYSTEM-}" ]; then
   # Git Bash spells C:\x as /c/x; Windows Python needs c:/x.
   case $script in /[A-Za-z]/*) drive=${script#/}; drive=${drive%%/*}; script=$drive:${script#/?} ;; esac
+fi
+case $script in *.pyc|*.pyo|*.pyz|*.zip) commit= ;; esac
+if [ -n "$commit" ] && [ "$script" != - ] && [ -f "$script" ] && [ -r "$script" ]; then
+  # Only a cold run of a readable script file runs through this boot. A compiled or zipped one
+  # (*.pyc, *.pyo, *.pyz, *.zip), a folder, stdin and every other run are the plain exec at the
+  # end and save nothing. The boot reads the script as source, so a compiled or zipped script
+  # under another name fails here where a plain run would not. For a source script it keeps what
+  # `python script` gives the script: sys.argv, sys.path[0] (the folder of the script's real
+  # path; on Windows CPython does not resolve symlinks there), __name__, __file__ and __loader__
+  # (on Windows: a C:\ or \\server script path as given on Python 3.11+, else its full path)
+  # in a fresh __main__ module, the exit status, and the message or traceback an uncaught
+  # exception prints, except that on Python 3.9 and 3.10 a KeyboardInterrupt traceback also
+  # lists the boot frames. It does not keep sys.orig_argv, the call stack (the script runs one
+  # boot frame deeper), sys.modules (the boot imports importlib.machinery) or, when an uncaught
+  # exception ends the run, the order of stdout and stderr on one shared pipe (the traceback
+  # comes before buffered stdout). The cache is saved
+  # only after a normal finish or a SystemExit with code None or 0 and a successful flush of
+  # stdout and stderr, before atexit handlers run: a private temporary file, then a rename,
+  # never into a folder it would have to create. Python 3.9 syntax, no single quotes.
+  boot='fresh = dict(globals())
+import io, os, sys
+cache, found, script = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3]
+sys.argv = sys.argv[3:]
+if os.name == "nt":
+    path = script if sys.version_info >= (3, 11) and (script[1:3] == ":\\" or script[:2] == "\\\\") else os.path.abspath(script)
+elif os.path.isabs(script):
+    path = script
+else:
+    path = os.path.join(os.getcwd(), script)
+if not getattr(sys.flags, "safe_path", False):
+    sys.path[0] = os.path.dirname(os.path.realpath(script))
+saved = False
+try:
+    with io.open_code(path) as handle:
+        source = handle.read()
+    from importlib.machinery import SourceFileLoader
+    main = type(sys)("__main__")
+    vars(main).update(fresh, __file__=path, __cached__=None, __loader__=SourceFileLoader("__main__", path))
+    sys.modules["__main__"] = main
+    exec(compile(source, path, "exec", dont_inherit=True), vars(main))
+    saved = True
+except SystemExit as stop:
+    saved = stop.code is None or (isinstance(stop.code, int) and stop.code == 0)
+    raise
+except BaseException as error:
+    trace = error.__traceback__
+    while trace is not None and trace.tb_frame.f_globals is globals():
+        trace = trace.tb_next
+    error.with_traceback(trace)
+    if isinstance(error, KeyboardInterrupt):
+        raise
+    sys.excepthook(type(error), error, trace)
+    sys.exit(1)
+finally:
+    for output in (sys.stdout, sys.stderr):
+        if saved and output is not None and not getattr(output, "closed", False):
+            try:
+                output.flush()
+            except Exception:
+                saved = False
+    if saved:
+        temporary = "%s.%d" % (cache, os.getpid())
+        try:
+            data = os.fsencode(found) + b"\n"
+            handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except (OSError, ValueError):
+            pass
+        else:
+            try:
+                with os.fdopen(handle, "wb") as stream:
+                    stream.write(data)
+                os.replace(temporary, cache)
+            except OSError:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass'
+  exec "$py" -c "$boot" "$cache" "$py" "$script" "$@"
 fi
 exec "$py" "$script" "$@"

@@ -23,12 +23,25 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS = ROOT / "hooks/router"
 CLI = ROOT / "bin/router"
+COMMANDS_CLI = ROOT / "bin/router-commands"
 BRIEF = "TASK add a text helper\nFILES src/text.py\nBAR run unit tests\nRETURN five lines"
 READ_PRESSURE = ("import json, sys; sys.path.insert(0, sys.argv[1]); import pressure; "
                  "print(json.dumps(pressure.read(sys.argv[2], 'claude', now=float(sys.argv[3]))))")
 
 
 class SymlinkedStatePaths(unittest.TestCase):
+    def test_commands_status_keeps_its_own_state_namespace(self):
+        env = {**os.environ, "HOME": str(self.link / "home"),
+               "XDG_STATE_HOME": str(self.link / "xdg"),
+               "ROUTER_STATE": str(self.real / "legacy"),
+               "PYTHONDONTWRITEBYTECODE": "1"}
+        result = subprocess.run([sys.executable, "-B", str(COMMANDS_CLI), "status"],
+                                env=env, cwd=self.project, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["state"], str(self.link / "xdg/router-commands/claude"))
+        self.assertFalse((self.real / "legacy").exists())
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="router-symlink-test-")
         self.addCleanup(temporary.cleanup)

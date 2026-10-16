@@ -4,6 +4,11 @@ Route simple work to cheaper models and harder work to stronger models. The owne
 
 Router routes bounded tasks in Claude Code and Codex CLI. Pair it with [Harness](https://github.com/aeiadev/harness) for checkpoint restore and context pressure signals.
 
+For local operations, observation, receipts, usage and evaluation without
+installing routing hooks or roles, use the [opt-in commands-only profile](docs/custom-install.md).
+
+0.5.0 pairs Router and Harness. Router keeps governed routing exclusions in force when accounting fails and provides an opt-in, isolated commands profile; Harness supplies bounded SSH, scp and rsync inspection with explicit project policy. Remote interception needs an active, qualified full Harness hook; the commands profile is local and registers no hooks. Offline checks and supplied observations do not establish live host, connector, remote readback or release qualification. See the [0.5.0 release notes](docs/releases/0.5.0.md) for scope and what has not been run.
+
 ## Demo
 
 Give a builder this brief:
@@ -89,7 +94,7 @@ Requirements: Bash 3.2 or newer, Python 3.9 or newer, Git, and Claude Code or Co
 | Native Windows | Hooks run in Git Bash | Hooks run in PowerShell through `command_windows` | Git for Windows; Python 3.9+ as `python3`, `python` or `py -3` |
 | WSL | As Linux, inside WSL | As Linux, inside WSL | As Linux; separate from a native Windows install |
 
-Every hook and the `router` command start through `hooks/router/pyrun.sh`, a POSIX `sh` launcher. It uses `ROUTER_PYTHON` when set, else the interpreter saved in Router's state folder, else the first of `python3`, `python` and `py -3` that is Python 3.9 or newer. Once Router's state folder exists, the first run that finds Python, even a `--dry-run`, saves its path there as `python`. With no Python, `install.sh` stops with `router install: missing requirement: python3`, and a hook prints this line on stderr and exits 1:
+Every hook and the `router` command start through `hooks/router/pyrun.sh`, a POSIX `sh` launcher. It uses `ROUTER_PYTHON` when set, else the interpreter saved in Router's state folder, else the first of `python3`, `python` and `py -3` that is Python 3.9 or newer. Once Router's state folder exists, the first run that finds Python and exits 0 saves its path there as `python`; a run that exits nonzero, such as a rejected command, saves nothing. With no Python, `install.sh` stops with `router install: missing requirement: python3`, and a hook prints this line on stderr and exits 1:
 
 ```text
 router: no Python 3.9 or newer found (python3, python, py -3); install one or set ROUTER_PYTHON
@@ -112,7 +117,7 @@ Native Windows and WSL keep separate installations; install in each one you use.
 
 Pair with [Harness](https://github.com/aeiadev/harness) for guarded commands and context restore; the shared Install both and Upgrade block above covers both tools. Check [Platforms](#platforms) for requirements.
 
-Use the [Router 0.4.1 release](https://github.com/aeiadev/router/releases/tag/v0.4.1)
+Use the [Router 0.5.0 release](https://github.com/aeiadev/router/releases/tag/v0.5.0)
 for this version. From its checkout:
 
 <!-- docs:skip -->
@@ -122,6 +127,8 @@ bash install.sh --host both
 export PATH="${CLAUDE_HOME:-$HOME/.claude}/router/bin:$PATH"
 router status
 ```
+
+The ordinary full install above is separate from the commands profile. `--profile commands` needs one explicit `--host claude` or `--host codex`, a saved dry-run plan, then `--plan`; it uses an isolated launcher and state and registers no roles, hooks or instructions. See [commands-only installation](docs/custom-install.md).
 
 For Claude Code, the installer copies agents to `~/.claude/agents`, the skill to `~/.claude/skills/dispatch`, hooks to `~/.claude/hooks/router`, and the CLI and helpers under `~/.claude/router`. It merges the hook registrations into `settings.json`, creates that file when absent, and backs up an existing file before changing it. Repeated installation does not duplicate registrations or remove unrelated settings and hooks.
 
@@ -219,6 +226,11 @@ names pass through unchanged, including their requested model and tools. Router
 does not lint their briefs, select a model, or count ladder attempts for them.
 Codex has no corresponding built-in names; an unlisted Codex agent also passes
 through as a custom type. Name a Router role explicitly to opt into its policy.
+
+Observable exclusions on governed roles still block when the ledger is unavailable.
+Native and custom agents keep their selected identity, model inheritance and tools,
+including connector-dependent configuration, and stay outside governed accounting.
+When history is unavailable, Router does not claim a ladder cap was enforced.
 
 The writer roles have no tier files. Claude injects their ladder model directly;
 Codex returns them to the owner when round three needs an upper role.
@@ -369,6 +381,12 @@ only prompt size and chosen role, never prompt text.
 Delegation can reduce the main session's token use, but starting agents and
 returning results also costs tokens.
 
+The default prompt budget did not grow in 0.5.0: always-on agent and skill text is
+unchanged and no hook adds always-on text. Local code size is separate from prompt
+bytes. Explicit commands, warnings and bounded failure diagnostics can consume
+context when you run them. `scripts/budget.py` reports bytes/4 as a count estimate
+with no tokenizer; bytes/4 is an estimate, not measured billing or savings.
+
 The mode is stored in a file named `auto` beside the shared OFF switch in the
 state directory (or beside `ROUTER_OFF_FILE` when overridden), leaving installed
 package files unchanged. `router status` includes the mode. `router off` or
@@ -482,7 +500,7 @@ Supported adapters are `claude-message`, `codex-turn`, `codex-cumulative` and `m
 
 ## Receipts
 
-Receipts are an explicit opt-in local record of a coordinator's claims. `router receipt create TASK_ID --file PATH` creates a new task, `router receipt record TASK_ID --file PATH` adds one event, and `router receipt show TASK_ID` reads the current snapshot. `--file -` reads stdin. The file path locates input only and is not stored in the receipt. There are no automatic hook writes, no automatic acceptance, and no live-host or usage claims from this command. Receipt data stays in Router's private local state directory; keep access to that directory private.
+Receipts are an explicit opt-in local record of a coordinator's claims. `router receipt create TASK_ID --file PATH` creates a new task, `router receipt record TASK_ID --file PATH` adds one event, and `router receipt show TASK_ID` reads the current snapshot. `--file -` reads stdin. The file path locates input only and is not stored in the receipt. There are no automatic hook writes, no automatic acceptance, and no live-host or usage claims from this command. Receipt file input is bounded and rejects unsupported special inputs without recording an event; receipts are coordinator attestations, not independent host proof. Receipt data stays in Router's private local state directory; keep access to that directory private.
 
 Use opaque identifiers for tasks, events, attempts, actors, verifiers, requirements and evidence: 1–64 ASCII letters, digits, `_` or `-`. Do not use paths, URLs, hostnames or free text. `alignment_digest` is a 64-character lowercase hex digest. An optional `brief_id` is a 16- or 64-character lowercase hex digest. Artifact `revision` is a 40- or 64-character lowercase hex digest and `readback` is a 64-character lowercase hex digest; they identify content, not locations. Input must be a JSON object and is limited to 64 KiB. These synthetic examples can be saved as `create.json`, `running.json`, `returned.json` and `attestation.json`, then submitted in that order with the commands above:
 
@@ -560,6 +578,10 @@ tools before dispatch; it preserves the user's named agent and its configuration
 A separate report-only observer compares supplied resulting-state proof and never
 replays or repairs a mutation. See [operations and observation](docs/operations.md)
 for the exact profile, commands, coordinator recipe and enforcement boundaries.
+The paired workflow keeps three evidence classes apart (offline adapter tests,
+installed executable and hook tests, and live host or connector tests); see
+[host validation](docs/host-validation.md). Declared-tool checks are local and static,
+and supplied JSON is not authenticated readback.
 
 ## Offline evaluation
 

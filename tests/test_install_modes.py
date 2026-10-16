@@ -29,6 +29,11 @@ def released_env(env):
 
 
 class BackupModes(unittest.TestCase):
+    def test_default_full_install_does_not_create_commands_profile(self):
+        self.run_installer(ROOT, self.claude)
+        self.assertFalse((self.claude / "router-commands").exists())
+        self.assertFalse((self.base / "home/.local/bin/claude-router").exists())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

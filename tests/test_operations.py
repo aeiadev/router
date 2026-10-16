@@ -208,5 +208,95 @@ class OperationsTests(unittest.TestCase):
                 self.assertEqual(event["tool_input"], payload)
 
 
+class Coordinator:
+    """Fake coordinator: preflights the agent and brief taken from the payload it is about to
+    dispatch, and dispatches only what the preflight allows; never calls a host or model.
+    Each dispatch is kept with the request the preflight received and the report it printed."""
+    def __init__(self, test, root):
+        self.test, self.root, self.dispatched = test, root, []
+
+    def run(self, payload, required, available):
+        request = {"brief": payload["prompt"], "agent": payload["subagent_type"], "required_tools": required,
+                   "available_tools": available}
+        result = self.test.cli(self.root, request)
+        report = json.loads(result.stdout)
+        if result.returncode == 0:
+            self.dispatched.append((request, report, json.dumps(payload)))
+        return result.returncode, report
+
+
+class PairedWorkflow(unittest.TestCase):
+    def test_missing_stops_unknown_stays_unknown_and_identity_survives(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            payload = {"subagent_type": "named-custom", "prompt": BRIEF, "model": "pinned\u00e9",
+                       "permission_mode": "custom", "tools": ["connector.read", "connector.write"]}
+            coordinator = Coordinator(OperationsTests("cli"), root)
+            code, report = coordinator.run(payload, ["connector.write"], ["connector.read"])
+            self.assertEqual((code, report["tool_status"], coordinator.dispatched), (3, "declared_missing", []))
+            code, report = coordinator.run(payload, ["connector.write"], None)
+            self.assertEqual((code, report["tool_status"], report["host_verified"]), (0, "unknown", False))
+            code, report = coordinator.run(payload, ["connector.write"], ["connector.write"])
+            self.assertEqual((code, report["tool_status"], report["host_verified"]), (0, "declared_available", False))
+            self.assertEqual(len(coordinator.dispatched), 2)
+            # What was dispatched is what was preflighted: the agent the preflight itself reported
+            # and the brief it validated. A different agent or prompt after the check fails here.
+            for request, checked, sent in coordinator.dispatched:
+                sent = json.loads(sent)
+                self.assertEqual((sent["subagent_type"], sent["prompt"], checked["brief_valid"]),
+                                 (checked["agent"], request["brief"], True))
+            # The preflight envelope is exactly brief, agent and tool declarations (any other key
+            # is rejected), so model, permission mode and tool grants never reach it: it cannot
+            # rewrite them, and it does not check them either.
+            self.assertEqual(report["agent"], "named-custom")
+            self.assertEqual(set(report), {"agent", "tool_status", "missing_tools", "host_verified",
+                                           "authorization", "mode", "routing_class", "brief_valid"})
+            self.assertNotIn("pinned", json.dumps(report))
+            self.assertEqual([set(request) for request, _, _ in coordinator.dispatched],
+                             [{"brief", "agent", "required_tools", "available_tools"}] * 2)
+            self.assertEqual(list(root.iterdir()), [])
+
+
+class HostValidationDocs(unittest.TestCase):
+    def read(self, relative):
+        return (ROOT / relative).read_text(encoding="utf-8")
+
+    def test_checklist_is_on_demand_and_separates_evidence_classes(self):
+        text = self.read("docs/host-validation.md")
+        for heading in ("## Evidence classes", "## On-demand checklist", "## Unrun here"):
+            self.assertIn(heading, text)
+        for label in ("Offline adapter tests", "Installed executable and hook tests",
+                      "Live host, connector or provider tests"):
+            self.assertIn(label, text)
+        for needed in ("installed Claude Code version", "installed Codex version", "hook trust",
+                       "custom agent identity", "model", "benign connector", "observer",
+                       "agreed budget", "SSH_FIXTURE_REQUIRED=1", "HARNESS_DIR"):
+            self.assertIn(needed.lower(), text.lower(), needed)
+        for refused in ("keeps no qualification registry", "sends no telemetry"):
+            self.assertIn(refused, text.lower())
+
+    def test_docs_claim_no_unrun_qualification(self):
+        for relative in ("docs/host-validation.md", "docs/operations.md",
+                         "tests/fixtures/operations_ssh/README.md"):
+            lowered = self.read(relative).lower()
+            for claim in ("is qualified", "are qualified", "has been qualified", "fully qualified",
+                          "qualified on", "verified live", "production-ready", "guarantees"):
+                self.assertNotIn(claim, lowered, (relative, claim))
+        self.assertIn("unrun", self.read("docs/host-validation.md").lower())
+
+    def test_operations_doc_links_workflow_and_fixture(self):
+        text = self.read("docs/operations.md")
+        for needed in ("host-validation.md", "tests/test_operations_ssh.py", "SSH_FIXTURE_REQUIRED=1"):
+            self.assertIn(needed, text)
+        self.assertIn("operations/v1", text)
+
+    def test_fixture_readme_reuses_harness_fixture(self):
+        text = self.read("tests/fixtures/operations_ssh/README.md")
+        self.assertIn("HARNESS_DIR", text)
+        self.assertIn("ssh-disposable", text)
+        self.assertIn("no second", text.lower())
+        self.assertFalse([p for p in (ROOT / "tests/fixtures/operations_ssh").iterdir() if p.name != "README.md"])
+
+
 if __name__ == "__main__":
     unittest.main()

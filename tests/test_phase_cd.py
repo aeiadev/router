@@ -73,6 +73,18 @@ class StandaloneCommands(unittest.TestCase):
         self.assertFalse(report["gates_mutation"])
         self.assertEqual(list(self.home.iterdir()), [])
 
+    def test_stale_observation_fails_without_mutation_or_replay(self):
+        digest = "a" * 64
+        base = dict(schema_version=1, task_id="task", target_id="target", requirements={"title": digest})
+        observed = dict(base, revision_id="rev_1", read_status="ok", evidence_id="e", verifier_id="v")
+        result = self.command("observe", dict(expected=dict(base, revision_id="rev_2"), observed=observed))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual((report["reported_verdict"], report["gates_mutation"], report["host_verified"]),
+                         ("FAIL", False, False))
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertEqual(list(self.work.iterdir()), [])
+
     def test_evaluator_works_without_sibling_install_and_rejects_private_input(self):
         from test_evaluation import fixture
         result = self.command("evaluate", fixture())

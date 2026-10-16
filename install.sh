@@ -45,6 +45,106 @@ try:
 except (OSError, UnicodeError) as exc:
     sys.exit(f"router install: cannot read {source / 'VERSION'}: {exc}")
 sys.dont_write_bytecode = True
+if "--profile" in sys.argv[2:]:
+    import subprocess
+    import hashlib
+    import tempfile
+    import shutil
+
+    profile_parser = argparse.ArgumentParser(description="Standalone Router commands profile")
+    profile_parser.add_argument("--profile", required=True, choices=("commands",))
+    profile_parser.add_argument("--host", required=True, choices=("claude", "codex"))
+    profile_parser.add_argument("--dry-run", action="store_true")
+    profile_parser.add_argument("--plan")
+    profile_parser.add_argument("--status", action="store_true")
+    profile_parser.add_argument("--rollback", action="store_true")
+    profile_parser.add_argument("--recover", action="store_true")
+    profile_parser.add_argument("--uninstall", action="store_true")
+    profile_args = profile_parser.parse_args(sys.argv[2:])
+    actions = sum(bool(value) for value in (profile_args.dry_run, profile_args.plan,
+                                            profile_args.status, profile_args.rollback,
+                                            profile_args.recover, profile_args.uninstall))
+    if actions != 1:
+        sys.exit("router install: choose one commands profile action")
+    home = Path(os.environ.get("HOME") or Path.home()).absolute()
+    host_home = os.environ.get(profile_args.host.upper() + "_HOME")
+    helper = [sys.executable, "-B", str(source / "scripts/commands_install.py")]
+    common_args = ["--product", "router", "--host", profile_args.host,
+                   "--home", str(home)]
+    if host_home:
+        common_args += ["--host-home", str(Path(host_home).expanduser().absolute())]
+    def build_payload(payload):
+        payload.chmod(0o700)
+        (payload / "bin").mkdir(mode=0o700)
+        (payload / "hooks/router").mkdir(parents=True, mode=0o700)
+        (payload / "hooks").chmod(0o700)
+        files = {"bin/router-commands": source / "bin/router-commands"}
+        for name in ("command_runtime", "receipt_context", "receipts", "compat", "operations",
+                     "observation", "evaluation", "usage", "cmd_observe", "cmd_receipt", "cmd_evaluate"):
+            files["hooks/router/" + name + ".py"] = source / "hooks/router" / (name + ".py")
+        inventory = {}
+        for relative, original in files.items():
+            data = original.read_bytes()
+            target = payload / relative
+            target.write_bytes(data)
+            mode = 0o700 if relative == "bin/router-commands" else 0o600
+            target.chmod(mode)
+            inventory[relative] = {"sha256": hashlib.sha256(data).hexdigest(), "mode": mode}
+        # The pin identifies the exact packaged bytes, including dirty and archive sources.
+        revision = "sha256:" + hashlib.sha256(json.dumps(
+            {"version": package_version, "files": inventory}, sort_keys=True
+        ).encode()).hexdigest()
+        profile = {"host": profile_args.host, "version": package_version, "source_revision": revision}
+        data = json.dumps(profile, sort_keys=True).encode()
+        (payload / "profile.json").write_bytes(data)
+        (payload / "profile.json").chmod(0o600)
+        inventory["profile.json"] = {"sha256": hashlib.sha256(data).hexdigest(), "mode": 0o600}
+        manifest = {"schema_version": 1, "source_revision": revision, "files": inventory}
+        (payload / "manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+        (payload / "manifest.json").chmod(0o600)
+
+    if profile_args.dry_run:
+        payload = Path(tempfile.mkdtemp(prefix="router-commands-payload-"))
+        try:
+            build_payload(payload)
+        except (OSError, subprocess.CalledProcessError):
+            shutil.rmtree(payload)
+            raise
+        action = "plan"
+        extra = ["--payload", str(payload)]
+    elif profile_args.plan:
+        # C1 checks exact saved plan bytes and the payload inventory before mutation.
+        saved = Path(profile_args.plan)
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("commands_installer_input", source / "scripts/commands_install.py")
+            commands_installer = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(commands_installer)
+            payload = Path(commands_installer.read_json(saved)["payload"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError,
+                commands_installer.Refusal):
+            sys.exit("router install: invalid commands profile plan")
+        if (payload.parent != Path(tempfile.gettempdir())
+                or not payload.name.startswith("router-commands-payload-")
+                or payload.is_symlink()):
+            sys.exit("router install: commands profile payload path unavailable")
+        if not payload.exists():
+            payload.mkdir(mode=0o700)
+            build_payload(payload)
+        action = "apply"
+        extra = ["--payload", str(payload), "--plan", str(saved)]
+    else:
+        action = next(name for flag, name in ((profile_args.status, "status"),
+                                               (profile_args.rollback, "rollback"),
+                                               (profile_args.recover, "recover"),
+                                               (profile_args.uninstall, "uninstall")) if flag)
+        extra = []
+    try:
+        result = subprocess.run(helper + [action] + common_args + extra, check=False)
+    finally:
+        if profile_args.dry_run:
+            shutil.rmtree(payload)
+    sys.exit(result.returncode)
 sys.path.insert(0, str(source / "hooks/router"))
 import common
 

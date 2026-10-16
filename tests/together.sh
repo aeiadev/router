@@ -159,6 +159,15 @@ for install_order in (("router", "harness"), ("harness", "router")):
             print(f"PASS: empty hooks key cleanup: install {install_order}, uninstall {uninstall_order}")
 PY
 
+# R3: paired commands profiles preserve each other and bespoke hosts (disposable homes, closed stdin).
+paired_log="$(mktemp)"
+if ! "$python" -B "$router_root/tests/test_install_commands_only.py" PairedCommandsProfileTests </dev/null >"$paired_log" 2>&1 \
+    || grep -q 'skipped' "$paired_log"; then
+  cat "$paired_log" >&2; rm -f "$paired_log"; printf '%s\n' 'FAIL: paired commands profiles (or skipped as incomplete)' >&2; exit 1
+fi
+tail -n 3 "$paired_log"; rm -f "$paired_log"
+printf '%s\n' 'PASS: paired commands profiles'
+
 # The 0.3 cases below need the released trees from old-trees.sh; they fail, never skip, without them.
 for old_tree in ROUTER_V01 ROUTER_V02 HARNESS_V01 HARNESS_V02; do
   if [[ -z "${!old_tree:-}" || ! -f "${!old_tree}/install.sh" ]]; then
@@ -1285,3 +1294,7 @@ if not ONLY or "versions" in ONLY:
     print(f"PASS: versions in both status commands ({tally['versions', 'claude']} claude, "
           f"{tally['versions', 'codex']} codex), plugin stand-down ({tally['plugin', 'claude']})")
 PY
+
+# R4: paired operations workflow on the Harness SSH fixture. Skips with an "unrun" message unless
+# SSH_FIXTURE_RUN=1 or SSH_FIXTURE_REQUIRED=1; with SSH_FIXTURE_REQUIRED=1 it fails if the fixture is missing.
+"$python" -B "$router_root/tests/test_operations_ssh.py" </dev/null
